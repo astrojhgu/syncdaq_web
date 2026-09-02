@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>syncdaq Web 控制台</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f1420; color: #e6e9f0; height: 100vh; display: flex; flex-direction: column; }
+  header { flex: 0 0 auto; padding: .7rem 1rem; background: #16202f; border-bottom: 1px solid #2a3a55; }
+  header h1 { font-size: 1.1rem; margin: 0; display: inline-block; }
+  .ws-badge { margin-left: 1rem; font-size: .75rem; padding: .1rem .5rem; border-radius: .6rem; background: #513; }
+  .ws-badge.ok { background: #1a4; }
+  main { flex: 1; min-height: 0; padding: 1rem; display: flex; gap: 1rem; }
+  .card { background: #16202f; border: 1px solid #263449; border-radius: .5rem; padding: .8rem; }
+  .card h2 { margin: 0 0 .6rem; font-size: .95rem; color: #9db6e0; }
+  #logSidebar { flex: 0 0 300px; display: flex; flex-direction: column; min-height: 0; }
+  #cards { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; overflow-y: auto; align-content: start; }
+  label { display: block; font-size: .78rem; margin: .35rem 0 .15rem; color: #b9c4d6; }
+  input, select, button { font: inherit; background: #0f1420; color: #e6e9f0; border: 1px solid #2a3a55; border-radius: .3rem; padding: .25rem .4rem; }
+  button { cursor: pointer; }
+  button.primary { background: #2b6cb0; border-color: #2b6cb0; }
+  button.danger { background: #8f2b2b; border-color: #8f2b2b; }
+  .row { display: flex; gap: .5rem; align-items: end; flex-wrap: wrap; }
+  .banner { margin: .3rem 0; padding: .5rem .7rem; border-radius: .4rem; background: #3a2f12; border: 1px solid #6a5418; font-size: .85rem; }
+  .banner.ok { background: #123a2a; border-color: #1a6a44; }
+  table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+  td, th { border-bottom: 1px solid #22304b; padding: .2rem .35rem; text-align: left; }
+  .mono { font-family: ui-monospace, monospace; }
+  #log { flex: 1; min-height: 0; overflow-y: auto; font-size: .72rem; background: #0b0f18; padding: .4rem; border-radius: .3rem; white-space: pre-wrap; }
+  #spectrum { width: 100%; height: 320px; background: #0b0f18; border-radius: .3rem; }
+  .progress { font-size: .75rem; color: #9db6e0; margin-top: .3rem; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>syncdaq 控制台</h1>
+  <span id="ws" class="ws-badge">连接中…</span>
+</header>
+
+<main>
+  <span id="cfgPoll" class="hidden">{{ poll_interval_ms }}</span>
+  <span id="cfgAddr" class="hidden">{{ default_addr }}</span>
+
+  <!-- 日志（左栏） -->
+  <aside id="logSidebar" class="card">
+    <h2>日志 / 最近响应</h2>
+    <div id="log"></div>
+  </aside>
+
+  <!-- 主功能（右侧网格） -->
+  <div id="cards">
+  <!-- 设备与初始化 -->
+  <section class="card">
+    <h2>设备</h2>
+    <div id="initBanner" class="banner">⚠️ 请先初始化设备：点击下方『初始化』（按设备当前 Xgbe 配置重放 SetClk/Sync/XGbeCfg/MixerSet）。</div>
+    <div class="row">
+      <button id="discover" class="primary">发现设备</button>
+      <select id="deviceSel"></select>
+      <button id="selectInitBtn" class="primary">选择并初始化</button>
+    </div>
+    <div class="row" style="margin-top:.5rem">
+      <button id="statusBtn">刷新状态</button>
+    </div>
+    <div id="devHint" style="font-size:.72rem;color:#9db6e0;margin-top:.4rem"></div>
+  </section>
+
+  <!-- 状态 -->
+  <section class="card">
+    <h2>设备状态（WS 自动刷新）</h2>
+    <table id="statusTable"></table>
+  </section>
+
+  <!-- 同步 / 流控 -->
+  <section class="card">
+    <h2>同步 / 流控</h2>
+    <div class="row">
+      <button id="syncBtn">Sync</button>
+      <button id="streamStartBtn">StreamStart</button>
+      <button id="streamStopBtn">StreamStop</button>
+      <button id="clrOvBtn">ClrOv</button>
+      <button id="rebootBtn" class="danger">重启</button>
+    </div>
+    <label>时钟源</label>
+    <div class="row">
+      <select id="clkSelect">
+        <option value="gps">GPS 板上模块 (10M+PPS)</option>
+        <option value="ext_clk">外接同轴 (10M+PPS)</option>
+      </select>
+      <button id="clkBtn" class="primary">设置时钟</button>
+    </div>
+    <div style="font-size:.72rem;color:#9db6e0;margin-top:.2rem">当前配置默认时钟源：
+      <span id="clkSelCurrent" class="mono"></span>
+    </div>
+  </section>
+
+  <!-- 本振 -->
+  <section class="card">
+    <h2>本振 (Mixer)</h2>
+    <label>频率 MHz（fy 取反下发）</label>
+    <div class="row">
+      <input id="mixerFreq" type="number" step="0.1" value="200" style="width:8rem">
+      <label style="margin:0">sync</label>
+      <input id="mixerSync" type="number" value="1" step="1" style="width:5rem">
+      <button id="mixerBtn" class="primary">设置本振</button>
+    </div>
+  </section>
+
+  <!-- 增益 -->
+  <section class="card">
+    <h2>增益 (DSA)</h2>
+    <div class="row">
+      <button id="dsaQueryBtn" class="primary">查询并填充</button>
+      <button id="dsaSetBtn" class="primary">下发全部</button>
+      <span id="dsaNports" class="mono" style="margin-left:.5rem"></span>
+    </div>
+    <div style="overflow-x:auto;margin-top:.3rem">
+      <table id="dsaTable" style="font-size:.72rem">
+        <thead>
+          <tr><th>port</th><th>dsa_value</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- QSFP -->
+  <section class="card">
+    <h2>QSFP 状态 / 设置</h2>
+    <div class="row">
+      <button id="qsfpQueryBtn" class="primary">查询</button>
+      <button id="qsfpSetBtn" class="primary">设置 QSFP</button>
+      <span id="qsfpModPresent" class="mono" style="margin-left:.5rem"></span>
+    </div>
+    <div style="overflow-x:auto;margin-top:.3rem">
+      <table id="qsfpTable" style="font-size:.72rem;width:100%"></table>
+    </div>
+    <div style="font-size:.72rem;color:#9db6e0;margin-top:.2rem">CDR：bit0-3=rx ch1-4、bit4-7=tx ch1-4；eq_ctrl/adapt_eq 为 4 通道各一值（并排输入）。</div>
+  </section>
+
+  <!-- 100G/XGbe -->
+  <section class="card" style="grid-column: 1 / -1">
+    <h2>100G (XGbe) 端口配置</h2>
+    <div class="row">
+      <button id="xgbeQueryBtn" class="primary">查询并填充（按 nports）</button>
+      <span id="xgbeNports" class="mono" style="margin-left:.5rem"></span>
+    </div>
+    <div style="font-size:.72rem;color:#9db6e0;margin:.3rem 0">MAC 支持 `-`、`:` 或无分隔的连续十六进制；IP 为 a.b.c.d。行数完全由设备 nports 决定。</div>
+    <div style="overflow-x:auto;margin-top:.3rem">
+      <table id="xgbeTable" style="font-size:.72rem">
+        <thead>
+          <tr><th>port</th><th>dst_mac</th><th>src_mac</th><th>dst_ip</th><th>src_ip</th><th>dst_port</th><th>src_port</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="row" style="margin-top:.5rem">
+      <button id="xgbeApplyBtn" class="primary">下发全部配置</button>
+    </div>
+  </section>
+
+  <!-- 谱分析 -->
+  <section class="card" style="grid-column: 1 / -1">
+    <h2>谱分析（抓取一小段 → 8 port FFT）</h2>
+    <div style="font-size:.72rem;color:#9db6e0;margin-bottom:.2rem">带宽按设备 Query 的采样率（smp_rate）自动设定；请先「发现并选择」设备，否则将提示未选择/设备未回复。</div>
+    <div class="row">
+      <label>每 port 帧数</label>
+      <input id="capFrames" type="number" value="{{ default_frames_per_port }}" min="1" style="width:7rem">
+      <label>FFT 点数</label>
+      <input id="capFft" type="number" value="{{ default_fft_size }}" min="64" step="1" style="width:8rem">
+      <label>窗</label>
+      <select id="capWindow">
+        <option value="hann">Hann</option>
+        <option value="rect">Rect</option>
+      </select>
+      <label>超时 ms</label>
+      <input id="capTimeout" type="number" value="5000" min="100" style="width:6rem">
+      <button id="captureBtn" class="primary">开始抓取</button>
+      <button id="cancelBtn" class="danger">取消</button>
+    </div>
+    <div id="captureProgress" class="progress"></div>
+    <canvas id="spectrum" ></canvas>
+    <div id="spectrumMeta" style="font-size:.72rem;color:#9db6e0;margin-top:.3rem"></div>
+    <div id="histTitle" style="font-size:.78rem;color:#9db6e0;margin-top:.5rem">原始数据直方图（-32768..+32767，bin 宽 4，仅显示有数据的通道）</div>
+    <div id="histWrap" style="display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.3rem"></div>
+  </section>
+
+  </div><!-- /#cards -->
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+function log(msg){ const el=$('log'); const t=new Date().toLocaleTimeString(); el.textContent += `[${t}] ${msg}\n`; el.scrollTop=el.scrollHeight; }
+function logErr(msg){ log('❌ '+msg); }
+function logOk(msg){ log('✅ '+msg); }
+
+async function api(path, body){
+  const opts = body===undefined ? {method:'POST'} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok){ throw new Error(j.error||r.status); }
+  return j;
+}
+
+// WS
+let ws=null, wsTimer=null;
+function wsConnect(){
+  ws = new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
+  ws.onopen = ()=>{ $('ws').textContent='已连接'; $('ws').className='ws-badge ok'; };
+  ws.onclose = ()=>{ $('ws').textContent='已断开'; $('ws').className='ws-badge'; clearTimeout(wsTimer); wsTimer=setTimeout(wsConnect,1500); };
+  ws.onmessage = ev=>{ try{ onWs(JSON.parse(ev.data)); }catch(e){ logErr('WS 解析失败 '+e); } };
+}
+function onWs(m){
+  if(m.type==='status'){ renderStatus(m.payload); }
+  else if(m.type==='capture_progress'){ renderProgress(m); }
+  else if(m.type==='capture_result'){ renderResult(m); }
+  else if(m.type==='capture_error'){ $('captureProgress').textContent='❌ '+m.error; logErr(m.error); }
+  else if(m.type==='init_step'){
+    const rep=m.reply||{};
+    const n=(rep.normal||[]).length, inv=(rep.invalid||[]).length, miss=(rep.no_reply||[]).length;
+    const first=rep.normal&&rep.normal[0]&&rep.normal[0].data?Object.keys(rep.normal[0].data)[0]:'-';
+    log(`  [#${m.index}] ${m.name}  normal=${n} invalid=${inv} no_reply=${miss}  reply=${first}`);
+  }
+  else if(m.type==='init_done'){
+    $('initBanner').className='banner ok';
+    $('initBanner').textContent='✔️ 已选择并初始化（'+m.steps+' 条）；如已配置好数据通路可开始抓取。';
+    loadConfig();
+  }
+  else if(m.type==='init_error'){ logErr('初始化错误: '+m.error); $('initBanner').textContent='⚠️ 初始化出错：'+m.error; }
+}
+
+// status
+function renderStatus(s){
+  const rows = [
+    ['地址', s.addr],
+    ['固件', `${s.fm_year}-${String(s.fm_month).padStart(2,'0')}-${String(s.fm_day).padStart(2,'0')} ${String(s.fm_hour).padStart(2,'0')}:${String(s.fm_minute).padStart(2,'0')}:${String(s.fm_second).padStart(2,'0')}`],
+    ['tick_cnt1', s.tick_cnt1],
+    ['tick_cnt2', s.tick_cnt2],
+    ['tick 差 10M', s.tick_ok?'OK':'异常'],
+    ['locked', s.locked + (s.sd_lock_ok?' (sd ok)':' (sd 异常)')],
+    ['trans_state', '0x'+s.trans_state.toString(16).toUpperCase()],
+    ['温度', s.health.temperature.toFixed(2)+' ℃'],
+    ['采样率', s.health.smp_rate+' MSps'],
+    ['nports', s.health.nports],
+    ['fifo_full_cnt', s.health.fifo_full_cnt],
+    ['fan_pulse_cnt', s.health.fan_pulse_cnt],
+    ['rfdc_restart_cnt', s.health.rfdc_restart_cnt],
+    ['over_voltage', s.health.over_voltage_state],
+    ['over_range', s.health.over_range_state],
+  ];
+  let html=''; for(const [k,v] of rows){ html += `<tr><td>${k}</td><td class="mono">${v}</td></tr>`; }
+  $('statusTable').innerHTML=html;
+  // 行数完全由 nports 决定：XGbe / DSA 表格据此建行
+  setNports(s.health.nports);
+}
+
+// progress
+function renderProgress(m){
+  const tot = m.progress.reduce((a,p)=>a+p.total,0);
+  const rec = m.progress.reduce((a,p)=>a+p.received,0);
+  let txt = `阶段: ${m.phase} | 已收 ${rec}/${tot} 帧`;
+  const byPort = m.progress.map(p=>p.total===0?`P${p.port}:skip`:`P${p.port}:${p.received}/${p.total}`).join(' ');
+  $('captureProgress').textContent = txt+'   ['+byPort+']';
+}
+
+// spectra
+function renderResult(m){
+  const r = m.result;
+  const data = r.spectra;
+  const hists = r.histograms||[];
+  logOk(`抓取完成：使能 ${r.enabled_ports.join(',')}，跳过(MAC=0) ${r.skipped_ports.join(',')}，出谱 ${data.length}个 / 直方图 ${hists.length}个`);
+  drawSpectra(data);
+  renderHistograms(hists);
+  const p0 = data.find(x=>x.port===0);
+  if(p0){
+    $('spectrumMeta').textContent = `LO=${p0.lo_mhz} MHz · 带宽 ±${(p0.smp_rate_mhz/2).toFixed(0)} MHz（全 ${p0.smp_rate_mhz} MSps）· bin 宽 ${(p0.bin_width_hz/1e3).toFixed(2)} kHz · 使能[${r.enabled_ports}] 跳过[${r.skipped_ports}]`;
+  }
+  $('captureProgress').textContent = '完成';
+}
+
+let histViews = {}; // 按通道(port)保存直方图显示范围，抓取后保留
+function renderHistograms(hists){
+  const wrap=$('histWrap'); wrap.innerHTML='';
+  hists.forEach(h=>{
+    const blk=document.createElement('div');
+    blk.style.cssText='background:#0b0f18;border:1px solid #22304b;border-radius:.3rem;padding:.3rem';
+    blk.innerHTML = `<div style="font-size:.7rem;color:#9db6e0;margin-bottom:.2rem">通道 P${h.port} · ${h.samples} 样本 · bin 宽 ${h.bin_width}
+        <button class="histReset" style="font-size:.65rem;margin-left:.5rem;padding:.05rem .4rem">重置</button></div>
+        <canvas width="320" height="120"></canvas>`;
+    wrap.appendChild(blk);
+    const cv=blk.querySelector('canvas');
+    cv._hist=h;
+    // 恢复上一次该通道的显示范围（若存在），否则整段
+    const saved=histViews[h.port];
+    let view = saved ? {lo:Math.max(h.min,saved.lo), hi:Math.min(h.max,saved.hi)} : {lo:h.min, hi:h.max};
+    if(!(view.hi>view.lo)) view={lo:h.min, hi:h.max};
+    cv._view=view;
+    cv.style.cursor='grab'; cv.style.userSelect='none';
+    drawHistCanvas(cv);
+    // 滚轮：横轴放大（基于鼠标位置），纵轴不动
+    cv.addEventListener('wheel', (e)=>{
+      e.preventDefault();
+      const rect=cv.getBoundingClientRect();
+      const frac=(e.clientX-rect.left)/rect.width;
+      const vAt=cv._view.lo + frac*(cv._view.hi-cv._view.lo);
+      const factor = e.deltaY<0 ? 1.25 : 0.8;
+      let lo = vAt - (vAt-cv._view.lo)*factor;
+      let hi = vAt + (cv._view.hi-vAt)*factor;
+      lo=Math.max(h.min, lo); hi=Math.min(h.max, hi);
+      const minW=16; if(hi-lo<minW){ const mid=(hi+lo)/2; lo=mid-minW/2; hi=mid+minW/2; }
+      if(hi-lo > h.max-h.min){ lo=h.min; hi=h.max; }
+      cv._view={lo,hi}; histViews[h.port]={lo,hi}; drawHistCanvas(cv);
+    }, {passive:false});
+    // 拖动平移：按住左键拖动沿 x 移动视图
+    let dragStart=null;
+    cv.addEventListener('mousedown', (e)=>{
+      if(e.button!==0) return;
+      dragStart={x:e.clientX, view:{...cv._view}};
+      cv.isDragging=true; cv.style.cursor='grabbing'; e.preventDefault();
+    });
+    cv.addEventListener('mousemove', (e)=>{
+      if(!cv.isDragging||!dragStart) return;
+      const rect=cv.getBoundingClientRect();
+      const dxPx=e.clientX-dragStart.x;
+      const valuePerPx=(dragStart.view.hi-dragStart.view.lo)/rect.width;
+      const range=dragStart.view.hi-dragStart.view.lo;
+      let lo=dragStart.view.lo - dxPx*valuePerPx;
+      let hi=lo+range;
+      if(lo<h.min){ lo=h.min; hi=h.min+range; }
+      if(hi>h.max){ hi=h.max; lo=h.max-range; }
+      cv._view={lo,hi}; histViews[h.port]={lo,hi}; drawHistCanvas(cv);
+    });
+    const endDrag=()=>{ cv.isDragging=false; dragStart=null; cv.style.cursor='grab'; };
+    cv.addEventListener('mouseup', endDrag);
+    cv.addEventListener('mouseleave', endDrag);
+    blk.querySelector('.histReset').addEventListener('click', ()=>{ cv._view={lo:h.min,hi:h.max}; histViews[h.port]={lo:h.min,hi:h.max}; drawHistCanvas(cv); });
+  });
+}
+function drawHistCanvas(cv){
+  const h=cv._hist, view=cv._view||{lo:h.min,hi:h.max};
+  const ctx=cv.getContext('2d'); const W=cv.width, H=cv.height; ctx.clearRect(0,0,W,H);
+  const c=h.counts||[]; if(!c.length){ ctx.fillStyle='#9db6e0'; ctx.font='10px system-ui'; ctx.fillText('无数据',8,20); return; }
+  let max=1; for(const x of c) if(x>max) max=x;
+  const x0=30, x1=W-8, y0=H-10, y1=14;
+  ctx.fillStyle='#9db6e0'; ctx.font='9px system-ui';
+  // 横轴标签：当前视图范围
+  ctx.fillText(view.lo.toFixed(0), x0-24, H-2); ctx.fillText('0', 0, H-2); ctx.fillText(view.hi.toFixed(0), x1-24, H-2);
+  ctx.strokeStyle='#22304b'; ctx.strokeRect(x0,y1,x1-x0,y0-y1);
+  // 0 参考线
+  if(view.lo<0 && view.hi>0){ const zx=x0+(x1-x0)*((0-view.lo)/(view.hi-view.lo)); ctx.strokeStyle='#334'; ctx.beginPath(); ctx.moveTo(zx,y1); ctx.lineTo(zx,y0); ctx.stroke(); }
+  ctx.fillStyle='#9db6e0'; ctx.font='8px system-ui';
+  for(let g=0;g<=2;g++){ const yy=y0-(y0-y1)*g/2; ctx.fillText((Math.pow(10,g*Math.log10(1+max)/2)-1).toFixed(0), 1, yy+3); }
+  const bw=h.bin_width;
+  const loIdx=Math.max(0, Math.floor((view.lo-h.min)/bw));
+  const hiIdx=Math.min(c.length-1, Math.ceil((view.hi-h.min)/bw));
+  ctx.strokeStyle='#5b8def'; ctx.lineWidth=1.2; ctx.beginPath(); let first=true;
+  for(let i=loIdx;i<=hiIdx;i++){
+    const vc=h.min+(i+0.5)*bw;
+    const x=x0+(x1-x0)*((vc-view.lo)/(view.hi-view.lo));
+    const v=Math.log10(1+c[i])/Math.log10(1+max);
+    const y=y0-(y0-y1)*v;
+    if(first){ ctx.moveTo(x,y); first=false; } else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  ctx.lineTo(x1,y0); ctx.lineTo(x0,y0); ctx.closePath(); ctx.fillStyle='rgba(91,141,239,0.15)'; ctx.fill();
+}
+
+function drawSpectra(data){
+  const cv = $('spectrum');
+  const dpr = window.devicePixelRatio||1;
+  const W = cv.clientWidth, H = 300;
+  cv.width = W*dpr; cv.height = H*dpr;
+  const ctx = cv.getContext('2d'); ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,W,H);
+  const colors=['#e5484d','#f5a524','#46a758','#5b8def','#8e4ec6','#00a2c7','#e93d82','#7dd3fc'];
+  let ymin=Infinity, ymax=-Infinity;
+  for(const d of data){ for(const b of d.bins){ if(b<ymin)ymin=b; if(b>ymax)ymax=b; } }
+  const ylo=ymax-80;
+  const pad=40; const plotW=W-pad*2, plotH=H-pad*2; const x0=pad, y0=pad+plotH;
+  // RF 频率范围 = LO ± fs/2（全带宽 ±fs/2）
+  const p0=data.find(x=>x.port===0)||data[0];
+  const fs=p0?p0.smp_rate_mhz:0; const lo=p0?p0.lo_mhz:0;
+  const fmin=lo-fs/2, fmax=lo+fs/2;
+  // 水平网格 + 纵轴 dB（底部=ylo，顶部=ymax，与曲线一致）
+  ctx.strokeStyle='#22304b'; ctx.fillStyle='#9db6e0'; ctx.font='10px system-ui';
+  for(let g=0;g<=4;g++){ const y=y0-(plotH*g/4); ctx.beginPath(); ctx.moveTo(x0,y); ctx.lineTo(x0+plotW,y); ctx.stroke();
+    ctx.fillText((ylo+(ymax-ylo)*g/4).toFixed(0)+' dB', 2, y+3); }
+  ctx.fillText('0', x0-8, y0+12);
+  // 横轴：RF 频率，从 lo-fs/2 到 lo+fs/2
+  for(let g=0;g<=4;g++){ const f=fmin+(fmax-fmin)*g/4; ctx.fillText(f.toFixed(1)+' MHz', x0+plotW*g/4-20, y0+12); }
+  for(const d of data){
+    const n=d.bins.length;
+    ctx.strokeStyle=colors[d.port%colors.length]; ctx.lineWidth=1.4; ctx.beginPath();
+    for(let i=0;i<n;i++){
+      const x=x0+plotW*(i/(n-1));
+      const v=d.bins[i];
+      const y=y0-plotH*((v-ylo)/(ymax-ylo));
+      if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  }
+  let lx=x0; ctx.font='11px system-ui';
+  for(const d of data){ ctx.fillStyle=colors[d.port%colors.length]; ctx.fillText('P'+d.port,lx,y0+28); lx+=30; }
+}
+
+// device
+async function discover(){
+  try{ const devs=await api('/api/discover'); const sel=$('deviceSel'); sel.innerHTML='';
+    devs.forEach(d=>{ const o=document.createElement('option'); o.value=d.ctrl_addr; o.textContent=d.ctrl_addr+'  (ip '+d.ip+')'; sel.appendChild(o); });
+    $('devHint').textContent='发现 '+devs.length+' 个设备'; logOk('发现 '+devs.length+' 设备');
+    if(devs.length){ sel.value = devs[devs.length-1].ctrl_addr; }
+  }catch(e){ logErr('发现失败: '+e.message); }
+}
+async function selectAndInit(){
+  const addr=$('deviceSel').value;
+  if(!addr){ logErr('请先发现设备'); return; }
+  try{
+    await api('/api/select',{addr});
+    $('devHint').textContent='已选择 '+addr;
+    logOk('已选择 '+addr);
+  }catch(e){ logErr('选择失败: '+e.message); return; }
+  try{
+    const r=await api('/api/init');   // 返回 {init_id}，逐个命令结果经 WS 推送
+    logOk('初始化开始（逐个下发，结果将逐条显示）…');
+  }catch(e){ logErr('初始化失败: '+e.message); }
+}
+
+// command helpers
+async function cmd(name,body){ try{ const r=await api('/api/cmd/'+name, body); const n=(r.normal||[]).length; const bad=(r.invalid||[]).length; const miss=(r.no_reply||[]).length;
+   logOk(`${name}: normal=${n} invalid=${bad} no_reply=${miss}`); if(bad)logErr(`${name} invalid ↓ ${JSON.stringify(r.invalid)}`);
+  }catch(e){ logErr(name+' 失败: '+e.message); } }
+
+ function bindButton(id, fn){ $(id).addEventListener('click', fn); }
+
+bindButton('discover', discover);
+bindButton('selectInitBtn', selectAndInit);
+bindButton('statusBtn', ()=>api('/api/status').then(logOk).catch(e=>logErr('状态: '+e.message)));
+bindButton('syncBtn', ()=>cmd('sync'));
+bindButton('streamStartBtn', ()=>cmd('stream/start'));
+bindButton('streamStopBtn', ()=>cmd('stream/stop'));
+bindButton('clrOvBtn', ()=>cmd('clrov'));
+bindButton('rebootBtn', ()=>cmd('reboot'));
+bindButton('clkBtn', ()=>{
+  const src=$('clkSelect').value;
+  const map = src==='ext_clk' ? {clk_src:2, pps_src:1} : {clk_src:1, pps_src:0};
+  cmd('clk', map);
+});
+bindButton('mixerBtn', async ()=>{
+  await cmd('mixer',{freq_mhz:Number($('mixerFreq').value),sync:Number($('mixerSync').value)});
+  loadConfig(); // 联动刷新本振 LO
+});
+bindButton('qsfpQueryBtn', async ()=>{
+  try{
+    const v = await fetch('/api/qsfp').then(x=>x.json());
+    renderQsfp(v);
+    logOk('QSFP 查询成功 cdr='+v.cdr_hex);
+  }catch(e){ logErr('QSFP 查询失败: '+e.message); }
+});
+bindButton('qsfpSetBtn', async ()=>{
+  try{
+    const g=k=>{const el=$('qsfpTable').querySelector(`[data-qsfp="${k}"]`); return el?el.value:'';};
+    const cdrRaw=(g('cdr')||'').trim();
+    const cdr=parseInt(cdrRaw.replace(/^0[xX]/,''),16);
+    if(isNaN(cdr)||cdr<0||cdr>0xff){ logErr('CDR 需为 8bit 十六进制，如 0x0F'); return; }
+    const eq=[]; for(let i=0;i<4;i++){ const u=$('qsfpTable').querySelector(`[data-qsfp="eq-${i}"]`).value.trim(); const x=parseInt(u,10); if(isNaN(x)||x<-128||x>127){ logErr('eq_ctrl 需为 -128..127'); return; } eq.push(x); }
+    const ad=[]; for(let i=0;i<4;i++){ const u=$('qsfpTable').querySelector(`[data-qsfp="adapt-${i}"]`).value.trim(); const x=parseInt(u,10); if(isNaN(x)||x<0||x>255){ logErr('adapt_eq 需为 0..255'); return; } ad.push(x); }
+    const r=await api('/api/qsfp', {cdr_ctrl:cdr, eq_ctrl:eq, adapt_eq:ad});
+    const n=(r.normal||[]).length, miss=(r.no_reply||[]).length;
+    logOk('QSFP 设置 cdr='+cdrRaw+' eq=['+eq.join(',')+'] adapt=['+ad.join(',')+'] normal='+n+' no_reply='+miss);
+  }catch(e){ logErr('QSFP 设置失败: '+e.message); }
+});
+
+// ---- QSFP 状态展示 / 设置（合并输入框） ----
+function oneBox(k,val,ph,w){ return `<input data-qsfp="${k}" value="${val??''}" placeholder="${ph}" style="width:${w}">`; }
+function fourBoxes(k,vals,ph){ let s=''; for(let i=0;i<4;i++){ s += `<input data-qsfp="${k}-${i}" value="${(vals||[])[i]??''}" placeholder="${ph}" style="width:2.2rem">`; if(i<3)s+=' '; } return s; }
+function renderQsfp(v){
+  // modpresent 是管脚状态：0=有模块（正常），非0=未检测到
+  $('qsfpModPresent').textContent = (v.modpresent===0?'存在':(v.modpresent===null?'—':'未检测到')) + (v.lpmode?' · 低功耗':'') ;
+  const rows=[['温度', (typeof v.temperature==='number')?v.temperature.toFixed(2)+' ℃':'-'],
+              ['电压', (typeof v.vcc==='number')?v.vcc.toFixed(3)+' V':'-'],
+              ['CDR ctrl (hex)', oneBox('cdr', v.cdr_hex||'', '0x0F','6rem')],
+              ['eq_ctrl', fourBoxes('eq', v.eq_ctrl, '0')],
+              ['adapt_eq', fourBoxes('adapt', v.adapt_eq, '1')],
+              ['restl/modsell/lpmode', `${v.restl}/${v.modsell}/${v.lpmode}`]];
+  let html=''; for(const [k,val] of rows){ html += `<tr><td>${k}</td><td class="mono">${val}</td></tr>`; }
+  const tb=v.tx_bias||[], tp=v.tx_power||[], rp=v.rx_power||[];
+  for(let ch=0;ch<4;ch++){
+    html += `<tr><td>ch${ch}</td><td class="mono">tx_bias=${typeof tb[ch]==='number'?tb[ch].toFixed(2):'-'} tx_pw=${typeof tp[ch]==='number'?tp[ch].toFixed(2):'-'} rx_pw=${typeof rp[ch]==='number'?rp[ch].toFixed(2):'-'}</td></tr>`;
+  }
+  $('qsfpTable').innerHTML=html;
+}
+bindButton('dsaQueryBtn', async ()=>{
+  try{
+    const n = currentNports||8;
+    const r = await fetch('/api/dsa/config?nports='+n).then(x=>x.json());
+    renderDsaTable(r.ports||[]);
+    logOk('查询 DSA 并填充 n='+n);
+  }catch(e){ logErr('DSA 查询失败: '+e.message); }
+});
+bindButton('dsaSetBtn', async ()=>{
+  try{
+    const ports=collectDsaRows();
+    if(!ports.length){ logErr('DSA 表格为空'); return; }
+    const r=await api('/api/dsa/config', ports);
+    logOk('下发 '+r.steps+' 个 port DSA');
+  }catch(e){ logErr('DSA 下发失败: '+e.message); }
+});
+
+// ---- XGbe 端口配置表格 ----
+function parseMac(s){
+  s=(s||'').trim(); if(!s) throw new Error('MAC 为空');
+  const hex=s.replace(/[:\-]/g,''); if(hex.length!==12) throw new Error('MAC 需为12个十六进制字符');
+  const a=[]; for(let i=0;i<12;i+=2) a.push(parseInt(hex.substr(i,2),16));
+  return a;
+}
+function parseIp(s){
+  s=(s||'').trim();
+  const p=s.split('.'); if(p.length!==4) throw new Error('IP 需为 a.b.c.d');
+  return p.map(x=>{const n=Number(x); if(!(n>=0&&n<=255)) throw new Error('IP 字节需 0-255'); return n;});
+}
+function addXgbeRow(p){
+  p = p || {};
+  const tb=$('xgbeTable').querySelector('tbody');
+  const idx=tb.children.length;
+  const port = p.port!==undefined? p.port : idx;
+  const tr=document.createElement('tr');
+  tr.setAttribute('data-port', port);
+  const cell=(k,v,w)=>`<td><input class="xgbe-input" data-k="${k}" value="${v??''}" style="width:${w}"></td>`;
+  tr.innerHTML = `<td class="mono">${port}</td>`
+    + cell('dst_mac',p.dst_mac,'8rem') + cell('src_mac',p.src_mac,'8rem')
+    + cell('dst_ip',p.dst_ip,'6rem') + cell('src_ip',p.src_ip,'6rem')
+    + cell('dst_port',p.dst_port,'4rem') + cell('src_port',p.src_port,'4rem');
+  tb.appendChild(tr);
+}
+function renderXgbeTable(ports){
+  const tb=$('xgbeTable').querySelector('tbody'); tb.innerHTML='';
+  ports.forEach(p=>addXgbeRow(p));
+  $('xgbeNports').textContent='nports='+ports.length;
+  currentNports=ports.length; // 与查询结果同步，避免后续 status 重建覆盖用户填的值
+}
+function collectXgbeRows(){
+  const rows=[...document.querySelectorAll('#xgbeTable tbody tr')];
+  return rows.map(tr=>{
+    const get=k=>tr.querySelector(`[data-k="${k}"]`).value;
+    const port=Number(tr.getAttribute('data-port'));
+    try{
+      return {port, dst_mac:parseMac(get('dst_mac')), src_mac:parseMac(get('src_mac')),
+              dst_ip:parseIp(get('dst_ip')), src_ip:parseIp(get('src_ip')),
+              dst_port:Number(get('dst_port')), src_port:Number(get('src_port'))};
+    }catch(e){ throw new Error('port '+port+': '+e.message); }
+  });
+}
+bindButton('xgbeQueryBtn', async ()=>{
+  try{
+    const r = await fetch('/api/xgbe/config').then(x=>x.json());
+    renderXgbeTable(r.ports||[]);
+    logOk('查询 XGbe 并填充 nports='+r.nports);
+  }catch(e){ logErr('查询失败: '+e.message); }
+});
+bindButton('xgbeApplyBtn', async ()=>{
+  try{
+    const ports=collectXgbeRows();
+    if(!ports.length){ logErr('表格为空'); return; }
+    const r=await api('/api/xgbe/config', ports);
+    logOk('下发 '+r.steps+' 个 port 配置');
+  }catch(e){ logErr('下发失败: '+e.message); }
+});
+// 行数完全由 nports 决定（去掉手动增删）
+let currentNports=null;
+function setNports(n){
+  n = Number(n)||0;
+  if(n===currentNports) return;
+  currentNports=n;
+  ensureXgbeRows(n);
+  ensureDsaRows(n);
+}
+function ensureXgbeRows(n){
+  const tb=$('xgbeTable').querySelector('tbody'); tb.innerHTML='';
+  for(let i=0;i<n;i++) addXgbeRow({port:i});
+  $('xgbeNports').textContent='nports='+n;
+}
+function ensureDsaRows(n){
+  const tb=$('dsaTable').querySelector('tbody'); tb.innerHTML='';
+  for(let i=0;i<n;i++) addDsaRow({port:i, dsa_value:''});
+  $('dsaNports').textContent='nports='+n;
+}
+// ---- DSA 表格 ----
+function addDsaRow(p){
+  p=p||{};
+  const tb=$('dsaTable').querySelector('tbody');
+  const port = p.port!==undefined? p.port : tb.children.length;
+  const tr=document.createElement('tr');
+  tr.setAttribute('data-port', port);
+  tr.innerHTML = `<td class="mono">${port}</td><td><input class="dsa-input" data-k="dsa_value" value="${p.dsa_value??''}" style="width:5rem"></td>`;
+  tb.appendChild(tr);
+}
+function renderDsaTable(ports){
+  const tb=$('dsaTable').querySelector('tbody'); tb.innerHTML='';
+  ports.forEach(p=>addDsaRow(p));
+  $('dsaNports').textContent='nports='+ports.length;
+  currentNports=ports.length;
+}
+function collectDsaRows(){
+  const rows=[...document.querySelectorAll('#dsaTable tbody tr')];
+  return rows.map(tr=>({port:Number(tr.getAttribute('data-port')), dsa_value:Number(tr.querySelector('[data-k="dsa_value"]').value)}));
+}
+
+// capture
+bindButton('captureBtn', async ()=>{
+  const body = {
+    frames_per_port:Number($('capFrames').value),
+    fft_size:Number($('capFft').value),
+    window:$('capWindow').value,
+    timeout_ms:Number($('capTimeout').value),
+  };
+  try{ const r=await api('/api/capture',body); $('captureProgress').textContent='已提交 '+r.capture_id+'，等待抓取…'; logOk('抓取已提交 '+r.capture_id); }
+  catch(e){ logErr('抓取提交失败: '+e.message); }
+});
+bindButton('cancelBtn', async ()=>{ const m=$('captureProgress').textContent.match(/cap-\d+/); if(!m){logErr('无进行中的抓取');return;}
+  try{ await api('/api/capture/'+m[0]+'/cancel'); logOk('已请求取消 '+m[0]); }catch(e){ logErr(e.message); } });
+
+wsConnect();
+
+// 加载配置，联动时钟源下拉
+async function loadConfig(){
+  try{
+    const r = await fetch('/api/config'); const c = await r.json();
+    if(c.clock_source){ $('clkSelect').value = c.clock_source; $('clkSelCurrent').textContent = c.clock_source; }
+  }catch(e){ logErr('加载配置失败 '+e.message); }
+}
+$('clkSelect').addEventListener('change', ()=>{ $('clkSelCurrent').textContent = $('clkSelect').value; });
+
+// 加载设备状态（XGbe/DSA/QSFP），回填面板
+function restoreQsfp(q){
+  const cdr_hex='0x'+(q.cdr_ctrl||0).toString(16).padStart(2,'0');
+  renderQsfp({ modpresent:null, lpmode:0, restl:0, modsell:0, temperature:'-', vcc:'-',
+    tx_bias:[], tx_power:[], rx_power:[], los_lol:[], alarm:[],
+    cdr_hex, eq_ctrl:q.eq_ctrl||[5,5,5,5], adapt_eq:q.adapt_eq||[1,1,1,1] });
+  logOk('已恢复 QSFP 设置 cdr='+cdr_hex);
+}
+async function loadSettings(){
+  try{
+    const r=await fetch('/api/settings'); const s=await r.json();
+    if(Array.isArray(s.xgbe) && s.xgbe.length){ renderXgbeTable(s.xgbe); logOk('已恢复 XGbe 配置（'+s.xgbe.length+' 个端口）'); }
+    if(Array.isArray(s.dsa) && s.dsa.length){ renderDsaTable(s.dsa); logOk('已恢复 DSA 配置（'+s.dsa.length+' 个端口）'); }
+    if(s.qsfp && (s.qsfp.cdr_ctrl!==undefined || s.qsfp.eq_ctrl)){ restoreQsfp(s.qsfp); }
+  }catch(e){ logErr('加载设备状态失败: '+e.message); }
+}
+loadConfig();
+loadSettings();
+</script>
+</body>
+</html>
