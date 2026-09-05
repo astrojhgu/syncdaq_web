@@ -33,11 +33,8 @@ pub struct Config {
     /// 'ext_clk'（外接同轴 10M+PPS，clk_src=2/pps_src=1）。默认 gps。
     #[serde(default = "default_clock_source")]
     pub clock_source: String,
-    /// 初始化命令里的本振频率（MHz，取正；内部按设备约定取负下发）。
-    #[serde(default = "default_init_freq_mhz")]
-    pub init_freq_mhz: f64,
-    /// 本振（LO）频率（MHz），用于频谱 x 轴偏移：RF = lo_mhz + 基带频率。默认同 init_freq_mhz。
-    #[serde(default = "default_init_freq_mhz")]
+    /// 本振（LO）频率（MHz），用于频谱 x 轴偏移与初始化本振：RF = lo_mhz + 基带频率。
+    #[serde(default = "default_lo_mhz")]
     pub lo_mhz: f64,
     /// 最近选中的设备控制地址，形如 "10.100.11.20:3000"。
     #[serde(default)]
@@ -53,8 +50,7 @@ impl Default for Config {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             clock_source: default_clock_source(),
-            init_freq_mhz: default_init_freq_mhz(),
-            lo_mhz: default_init_freq_mhz(),
+            lo_mhz: default_lo_mhz(),
             selected_device: None,
             capture: CaptureDefaults::default(),
         }
@@ -84,7 +80,7 @@ fn default_poll_interval_ms() -> u64 {
 fn default_clock_source() -> String {
     "gps".to_string()
 }
-fn default_init_freq_mhz() -> f64 {
+fn default_lo_mhz() -> f64 {
     360.0
 }
 fn default_capture_frames() -> usize {

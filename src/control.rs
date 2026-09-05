@@ -82,7 +82,10 @@ pub struct HealthView {
     pub rfdc_restart_cnt: u32,
     pub temperature: f32,
     pub nports: u32,
-    pub fifo_full_cnt: u32,
+    /// 当前 fifo 占用数（fifo_full_cnt 高 16 位）
+    pub fifo_len: u32,
+    /// 历史最大 fifo 占用数（fifo_full_cnt 低 16 位，仅重启复位）
+    pub fifo_max: u32,
     pub smp_rate: u32,
     pub fan_pulse_cnt: u32,
     pub over_voltage_state: u32,
@@ -156,7 +159,8 @@ pub fn parse_status(addr: &SocketAddr, msg: &CtrlMsg) -> Option<StatusSnapshot> 
                 rfdc_restart_cnt: *rfdc_restart_cnt,
                 temperature: *temperature,
                 nports: *nports,
-                fifo_full_cnt: *fifo_full_cnt,
+                fifo_len: *fifo_full_cnt >> 16,
+                fifo_max: *fifo_full_cnt & 0xffff,
                 smp_rate: *smp_rate,
                 fan_pulse_cnt: *fan_pulse_cnt,
                 over_voltage_state: *over_voltage_state,

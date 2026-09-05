@@ -262,7 +262,8 @@ async fn do_init(st: State<SharedState>) -> Result<Json<serde_json::Value>, ApiE
             cfg.local_ctrl_port,
             cfg.timeout_ms,
             cfg.clock_source.clone(),
-            cfg.init_freq_mhz,
+            // 初始化使用持久化的本振（与频谱 x 轴、混频面板联动）
+            cfg.lo_mhz,
         )
     };
     let init_id = format!("init-{}", chrono::Utc::now().timestamp_millis());
@@ -314,12 +315,6 @@ async fn do_init(st: State<SharedState>) -> Result<Json<serde_json::Value>, ApiE
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        // 3) 联动本振 LO
-        {
-            let mut cfg = st_arc.config.write().unwrap_or_else(|e| e.into_inner());
-            cfg.lo_mhz = freq_mhz;
-            cfg.save();
-        }
         let _ = ws.send(WsMsg::InitDone { init_id: init_id_task.clone(), steps });
     });
 
