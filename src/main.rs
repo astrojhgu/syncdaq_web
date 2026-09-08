@@ -77,6 +77,15 @@ enum WsMsg {
         init_id: String,
         error: String,
     },
+    /// 服务器端“界面状态”（仅设备控制设置）——多浏览器一致，状态改变时广播。
+    UiState {
+        config: Config,
+        settings: DeviceSettings,
+    },
+    /// 已发现设备列表（服务器内存态），发现后广播、连接时下发。
+    Devices {
+        devices: Vec<DeviceEntry>,
+    },
 }
 
 struct AppState {
@@ -92,6 +101,17 @@ struct AppState {
 }
 
 type SharedState = Arc<AppState>;
+
+fn ui_state_message(st: &SharedState) -> WsMsg {
+    let config = st.config.read().unwrap().clone();
+    let settings = st.settings.read().unwrap().clone();
+    WsMsg::UiState { config, settings }
+}
+
+/// 把当前服务器端唯一界面状态广播给所有浏览器（状态改变后调用）。
+fn broadcast_state(st: &SharedState) {
+    let _ = st.ws_tx.send(ui_state_message(st));
+}
 
 // ---------------------------------------------------------------- errors
 
@@ -237,7 +257,9 @@ async fn discover(st: State<SharedState>) -> Result<Json<Vec<DeviceEntry>>, ApiE
             st.devices.write().unwrap().push(DeviceEntry { ctrl_addr: addr.to_string(), ip, port });
         }
     }
-    Ok(Json(st.devices.read().unwrap().clone()))
+    let devs = st.devices.read().unwrap().clone();
+    let _ = st.ws_tx.send(WsMsg::Devices { devices: devs.clone() });
+    Ok(Json(devs))
 }
 
 async fn get_devices(st: State<SharedState>) -> Json<Vec<DeviceEntry>> {
@@ -251,6 +273,7 @@ async fn select_device(st: State<SharedState>, Json(req): Json<SelectReq>) -> Re
         cfg.selected_device = Some(req.addr.clone());
         cfg.save();
     }
+    broadcast_state(&st);
     Ok(Json(serde_json::json!({ "selected_device": req.addr })))
 }
 
@@ -316,6 +339,13 @@ async fn do_init(st: State<SharedState>) -> Result<Json<serde_json::Value>, ApiE
         }
 
         let _ = ws.send(WsMsg::InitDone { init_id: init_id_task.clone(), steps });
+        // mark initialized (持久化 + 广播)
+        {
+            let mut cfg = st_arc.config.write().unwrap_or_else(|e| e.into_inner());
+            cfg.initialized = true;
+            cfg.save();
+        }
+        broadcast_state(&st_arc);
     });
 
     Ok(Json(serde_json::json!({ "init_id": init_id })))
@@ -431,6 +461,7 @@ async fn set_qsfp(st: State<SharedState>, Json(req): Json<QsfpSetReq>) -> Result
         set.qsfp = QsfpSetting { cdr_ctrl: req.cdr_ctrl as u32, eq_ctrl: req.eq_ctrl, adapt_eq: req.adapt_eq };
         set.save();
     }
+    broadcast_state(&st);
     Ok(r)
 }
 async fn cmd_mixer(st: State<SharedState>, Json(req): Json<MixerReq>) -> Result<Json<SummaryView>, ApiError> {
@@ -441,6 +472,7 @@ async fn cmd_mixer(st: State<SharedState>, Json(req): Json<MixerReq>) -> Result<
         cfg.lo_mhz = req.freq_mhz;
         cfg.save();
     }
+    broadcast_state(&st);
     Ok(r)
 }
 async fn cmd_dsa_set(st: State<SharedState>, Json(req): Json<DsaSetReq>) -> Result<Json<SummaryView>, ApiError> {
@@ -450,7 +482,18 @@ async fn cmd_dsa_get(st: State<SharedState>, Json(req): Json<DsaGetReq>) -> Resu
     run_cmd(&st, control::cmd_get_dsa(req.port_id)).await
 }
 async fn cmd_clk(st: State<SharedState>, Json(req): Json<ClkReq>) -> Result<Json<SummaryView>, ApiError> {
-    run_cmd(&st, control::cmd_set_clk(req.clk_src, req.pps_src)).await
+    let r = run_cmd(&st, control::cmd_set_clk(req.clk_src, req.pps_src)).await?;
+    // 同步时钟源到共享状态：clk_src 2=ext_clk，其余= gps
+    {
+        let mut cfg = st.config.write().unwrap();
+        cfg.clock_source = match req.clk_src {
+            2 => "ext_clk".to_string(),
+            _ => "gps".to_string(),
+        };
+        cfg.save();
+    }
+    broadcast_state(&st);
+    Ok(r)
 }
 async fn cmd_xgbe_query(st: State<SharedState>) -> Result<Json<SummaryView>, ApiError> {
     run_cmd(&st, control::cmd_xgbe_query()).await
@@ -602,6 +645,7 @@ async fn set_xgbe_config(st: State<SharedState>, Json(ports): Json<Vec<XgbePortI
         set.xgbe = xgbe_in_to_settings(&ports_for_settings);
         set.save();
     }
+    broadcast_state(&st);
     Ok(Json(serde_json::json!({ "steps": out.len(), "results": out })))
 }
 
@@ -668,6 +712,7 @@ async fn set_dsa_config(st: State<SharedState>, Json(ports): Json<Vec<DsaSetIn>>
         set.dsa = ports_for_settings.iter().map(|p| DsaSetting { port: p.port, dsa_value: p.dsa_value }).collect();
         set.save();
     }
+    broadcast_state(&st);
     Ok(Json(serde_json::json!({ "steps": out.len(), "results": out })))
 }
 
@@ -800,6 +845,19 @@ async fn ws_conn(socket: WebSocket, st: SharedState) {
             .send(Message::Text(serde_json::to_string(&WsMsg::Status { payload: s }).unwrap().into()))
             .await;
     }
+    // 连接即下发服务器端唯一界面状态（多浏览器一致）
+    let _ = sender
+        .send(Message::Text(
+            serde_json::to_string(&ui_state_message(&st)).unwrap().into(),
+        ))
+        .await;
+    // 连接即下发已发现设备列表
+    let devs = st.devices.read().unwrap().clone();
+    let _ = sender
+        .send(Message::Text(
+            serde_json::to_string(&WsMsg::Devices { devices: devs }).unwrap().into(),
+        ))
+        .await;
 
     loop {
         tokio::select! {

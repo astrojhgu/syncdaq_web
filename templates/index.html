@@ -32,6 +32,7 @@
   #spectrum { width: 100%; height: 320px; background: #0b0f18; border-radius: .3rem; }
   .progress { font-size: .75rem; color: #9db6e0; margin-top: .3rem; }
   .hidden { display: none; }
+  .dirty { outline: 2px solid #f5a524 !important; }
 </style>
 </head>
 <body>
@@ -85,7 +86,7 @@
     </div>
     <label>时钟源</label>
     <div class="row">
-      <select id="clkSelect">
+      <select id="clkSelect" class="editable">
         <option value="gps">GPS 板上模块 (10M+PPS)</option>
         <option value="ext_clk">外接同轴 (10M+PPS)</option>
       </select>
@@ -101,7 +102,7 @@
     <h2>本振 (Mixer)</h2>
     <label>频率 MHz（fy 取反下发）</label>
     <div class="row">
-      <input id="mixerFreq" type="number" step="0.1" value="200" style="width:8rem">
+      <input id="mixerFreq" type="number" step="0.1" value="200" class="editable" style="width:8rem">
       <label style="margin:0">sync</label>
       <input id="mixerSync" type="number" value="1" step="1" style="width:5rem">
       <button id="mixerBtn" class="primary">设置本振</button>
@@ -229,6 +230,8 @@ function onWs(m){
     loadConfig();
   }
   else if(m.type==='init_error'){ logErr('初始化错误: '+m.error); $('initBanner').textContent='⚠️ 初始化出错：'+m.error; }
+  else if(m.type==='ui_state'){ renderUiState(m.config, m.settings); clearDirty(document); }
+  else if(m.type==='devices'){ fillDeviceSel(m.devices, false); }
 }
 
 // status
@@ -407,12 +410,18 @@ function drawSpectra(data){
 }
 
 // device
+let currentSelected = null;
+function fillDeviceSel(devs, autoselectLast){
+  const sel=$('deviceSel'); if(!sel) return;
+  sel.innerHTML='';
+  (devs||[]).forEach(d=>{ const o=document.createElement('option'); o.value=d.ctrl_addr; o.textContent=d.ctrl_addr+'  (ip '+d.ip+')'; sel.appendChild(o); });
+  $('devHint').textContent='已发现 '+((devs||[]).length)+' 个设备';
+  if(currentSelected && [...sel.options].some(o=>o.value===currentSelected)){ sel.value=currentSelected; }
+  else if(autoselectLast && devs && devs.length){ sel.value=devs[devs.length-1].ctrl_addr; }
+}
 async function discover(){
-  try{ const devs=await api('/api/discover'); const sel=$('deviceSel'); sel.innerHTML='';
-    devs.forEach(d=>{ const o=document.createElement('option'); o.value=d.ctrl_addr; o.textContent=d.ctrl_addr+'  (ip '+d.ip+')'; sel.appendChild(o); });
-    $('devHint').textContent='发现 '+devs.length+' 个设备'; logOk('发现 '+devs.length+' 设备');
-    if(devs.length){ sel.value = devs[devs.length-1].ctrl_addr; }
-  }catch(e){ logErr('发现失败: '+e.message); }
+  try{ const devs=await api('/api/discover'); fillDeviceSel(devs, true); logOk('发现 '+devs.length+' 设备'); }
+  catch(e){ logErr('发现失败: '+e.message); }
 }
 async function selectAndInit(){
   const addr=$('deviceSel').value;
@@ -446,11 +455,12 @@ bindButton('rebootBtn', ()=>cmd('reboot'));
 bindButton('clkBtn', ()=>{
   const src=$('clkSelect').value;
   const map = src==='ext_clk' ? {clk_src:2, pps_src:1} : {clk_src:1, pps_src:0};
-  cmd('clk', map);
+  cmd('clk', map).then(()=>clearDirty(document));
 });
 bindButton('mixerBtn', async ()=>{
   await cmd('mixer',{freq_mhz:Number($('mixerFreq').value),sync:Number($('mixerSync').value)});
   loadConfig(); // 联动刷新本振 LO
+  clearDirty(document);
 });
 bindButton('qsfpQueryBtn', async ()=>{
   try{
@@ -470,12 +480,13 @@ bindButton('qsfpSetBtn', async ()=>{
     const r=await api('/api/qsfp', {cdr_ctrl:cdr, eq_ctrl:eq, adapt_eq:ad});
     const n=(r.normal||[]).length, miss=(r.no_reply||[]).length;
     logOk('QSFP 设置 cdr='+cdrRaw+' eq=['+eq.join(',')+'] adapt=['+ad.join(',')+'] normal='+n+' no_reply='+miss);
+    clearDirty(document);
   }catch(e){ logErr('QSFP 设置失败: '+e.message); }
 });
 
 // ---- QSFP 状态展示 / 设置（合并输入框） ----
-function oneBox(k,val,ph,w){ return `<input data-qsfp="${k}" value="${val??''}" placeholder="${ph}" style="width:${w}">`; }
-function fourBoxes(k,vals,ph){ let s=''; for(let i=0;i<4;i++){ s += `<input data-qsfp="${k}-${i}" value="${(vals||[])[i]??''}" placeholder="${ph}" style="width:2.2rem">`; if(i<3)s+=' '; } return s; }
+function oneBox(k,val,ph,w){ return `<input class="editable" data-qsfp="${k}" value="${val??''}" placeholder="${ph}" style="width:${w}">`; }
+function fourBoxes(k,vals,ph){ let s=''; for(let i=0;i<4;i++){ s += `<input class="editable" data-qsfp="${k}-${i}" value="${(vals||[])[i]??''}" placeholder="${ph}" style="width:2.2rem">`; if(i<3)s+=' '; } return s; }
 function renderQsfp(v){
   // modpresent 是管脚状态：0=有模块（正常），非0=未检测到
   $('qsfpModPresent').textContent = (v.modpresent===0?'存在':(v.modpresent===null?'—':'未检测到')) + (v.lpmode?' · 低功耗':'') ;
@@ -506,6 +517,7 @@ bindButton('dsaSetBtn', async ()=>{
     if(!ports.length){ logErr('DSA 表格为空'); return; }
     const r=await api('/api/dsa/config', ports);
     logOk('下发 '+r.steps+' 个 port DSA');
+    clearDirty(document);
   }catch(e){ logErr('DSA 下发失败: '+e.message); }
 });
 
@@ -528,7 +540,7 @@ function addXgbeRow(p){
   const port = p.port!==undefined? p.port : idx;
   const tr=document.createElement('tr');
   tr.setAttribute('data-port', port);
-  const cell=(k,v,w)=>`<td><input class="xgbe-input" data-k="${k}" value="${v??''}" style="width:${w}"></td>`;
+  const cell=(k,v,w)=>`<td><input class="xgbe-input editable" data-k="${k}" value="${v??''}" style="width:${w}"></td>`;
   tr.innerHTML = `<td class="mono">${port}</td>`
     + cell('dst_mac',p.dst_mac,'8rem') + cell('src_mac',p.src_mac,'8rem')
     + cell('dst_ip',p.dst_ip,'6rem') + cell('src_ip',p.src_ip,'6rem')
@@ -566,6 +578,7 @@ bindButton('xgbeApplyBtn', async ()=>{
     if(!ports.length){ logErr('表格为空'); return; }
     const r=await api('/api/xgbe/config', ports);
     logOk('下发 '+r.steps+' 个 port 配置');
+    clearDirty(document);
   }catch(e){ logErr('下发失败: '+e.message); }
 });
 // 行数完全由 nports 决定（去掉手动增删）
@@ -594,7 +607,7 @@ function addDsaRow(p){
   const port = p.port!==undefined? p.port : tb.children.length;
   const tr=document.createElement('tr');
   tr.setAttribute('data-port', port);
-  tr.innerHTML = `<td class="mono">${port}</td><td><input class="dsa-input" data-k="dsa_value" value="${p.dsa_value??''}" style="width:5rem"></td>`;
+  tr.innerHTML = `<td class="mono">${port}</td><td><input class="dsa-input editable" data-k="dsa_value" value="${p.dsa_value??''}" style="width:5rem"></td>`;
   tb.appendChild(tr);
 }
 function renderDsaTable(ports){
@@ -633,7 +646,29 @@ async function loadConfig(){
 }
 $('clkSelect').addEventListener('change', ()=>{ $('clkSelCurrent').textContent = $('clkSelect').value; });
 
-// 加载设备状态（XGbe/DSA/QSFP），回填面板
+// ---- 服务器端唯一界面状态（多浏览器一致）----
+function renderUiState(cfg, settings){
+  try{
+    if(cfg && cfg.clock_source){ $('clkSelect').value = cfg.clock_source; $('clkSelCurrent').textContent = cfg.clock_source; }
+    if(cfg && typeof cfg.lo_mhz==='number'){ $('mixerFreq').value = cfg.lo_mhz; }
+    if(cfg){ currentSelected = cfg.selected_device||null;
+      // 初始化 banner 反映服务器状态
+      if(cfg.initialized){ $('initBanner').className='banner ok'; $('initBanner').textContent='✔️ 已初始化；如已配置好数据通路可开始抓取。'; }
+      else { $('initBanner').className='banner'; $('initBanner').textContent='⚠️ 请先初始化设备：点击下方『选择并初始化』（按设备当前 Xgbe 配置重放 SetClk/Sync/XGbeCfg/MixerSet）。'; }
+    }
+    if(cfg && cfg.selected_device && $('deviceSel')){ const sel=$('deviceSel'); if([...sel.options].some(o=>o.value===cfg.selected_device)) sel.value=cfg.selected_device; }
+    if(!settings) return;
+    if(Array.isArray(settings.xgbe) && settings.xgbe.length){ renderXgbeTable(settings.xgbe); }
+    if(Array.isArray(settings.dsa) && settings.dsa.length){ renderDsaTable(settings.dsa); }
+    if(settings.qsfp){ restoreQsfp(settings.qsfp); }
+  }catch(e){ logErr('界面状态渲染失败: '+e.message); }
+}
+function clearDirty(root){
+  const r = root && root.querySelectorAll ? root : document;
+  r.querySelectorAll('.dirty').forEach(el=>el.classList.remove('dirty'));
+}
+
+// 放置共享状态持久化函数（保留 loadConfig 供初始化/混频后刷新）
 function restoreQsfp(q){
   const cdr_hex='0x'+(q.cdr_ctrl||0).toString(16).padStart(2,'0');
   renderQsfp({ modpresent:null, lpmode:0, restl:0, modsell:0, temperature:'-', vcc:'-',
@@ -641,16 +676,12 @@ function restoreQsfp(q){
     cdr_hex, eq_ctrl:q.eq_ctrl||[5,5,5,5], adapt_eq:q.adapt_eq||[1,1,1,1] });
   logOk('已恢复 QSFP 设置 cdr='+cdr_hex);
 }
-async function loadSettings(){
-  try{
-    const r=await fetch('/api/settings'); const s=await r.json();
-    if(Array.isArray(s.xgbe) && s.xgbe.length){ renderXgbeTable(s.xgbe); logOk('已恢复 XGbe 配置（'+s.xgbe.length+' 个端口）'); }
-    if(Array.isArray(s.dsa) && s.dsa.length){ renderDsaTable(s.dsa); logOk('已恢复 DSA 配置（'+s.dsa.length+' 个端口）'); }
-    if(s.qsfp && (s.qsfp.cdr_ctrl!==undefined || s.qsfp.eq_ctrl)){ restoreQsfp(s.qsfp); }
-  }catch(e){ logErr('加载设备状态失败: '+e.message); }
-}
+
+// 脏标记：共享输入被编辑即标 .dirty（“未应用”）
+document.addEventListener('input', e=>{ if(e.target && e.target.classList && e.target.classList.contains('editable')) e.target.classList.add('dirty'); });
+document.addEventListener('change', e=>{ if(e.target && e.target.classList && e.target.classList.contains('editable')) e.target.classList.add('dirty'); });
+
 loadConfig();
-loadSettings();
 </script>
 </body>
 </html>

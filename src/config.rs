@@ -39,6 +39,9 @@ pub struct Config {
     /// 最近选中的设备控制地址，形如 "10.100.11.20:3000"。
     #[serde(default)]
     pub selected_device: Option<String>,
+    /// 是否已完成初始化（成功下发过 Init）——用于页面 banner 提示。
+    #[serde(default)]
+    pub initialized: bool,
     #[serde(default)]
     pub capture: CaptureDefaults,
 }
@@ -52,6 +55,7 @@ impl Default for Config {
             clock_source: default_clock_source(),
             lo_mhz: default_lo_mhz(),
             selected_device: None,
+            initialized: false,
             capture: CaptureDefaults::default(),
         }
     }
