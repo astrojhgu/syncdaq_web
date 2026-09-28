@@ -246,6 +246,8 @@ function renderStatus(s){
     ['trans_state', '0x'+s.trans_state.toString(16).toUpperCase()],
     ['温度', s.health.temperature.toFixed(2)+' ℃'],
     ['采样率', s.health.smp_rate+' MSps'],
+    ['采样位宽', s.health.smp_bits],
+    ['数据格式', s.health.iq_mode===1?'IQ':'real'],
     ['nports', s.health.nports],
     ['fifo 占用(当前)', s.health.fifo_len],
     ['fifo 占用(历史最大)', s.health.fifo_max],

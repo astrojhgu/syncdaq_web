@@ -87,6 +87,10 @@ pub struct HealthView {
     /// 历史最大 fifo 占用数（fifo_full_cnt 低 16 位，仅重启复位）
     pub fifo_max: u32,
     pub smp_rate: u32,
+    /// 采样位宽（smp_bits）
+    pub smp_bits: u32,
+    /// 数据格式：1=IQ，其它=real（iq_mode）
+    pub iq_mode: u32,
     pub fan_pulse_cnt: u32,
     pub over_voltage_state: u32,
     pub over_range_state: u32,
@@ -135,6 +139,8 @@ pub fn parse_status(addr: &SocketAddr, msg: &CtrlMsg) -> Option<StatusSnapshot> 
             over_voltage_state,
             over_range_state,
             smp_rate,
+            smp_bits,
+            iq_mode,
             fan_pulse_cnt,
             pkt_cnt1,
             axi_frame_cnt1,
@@ -162,6 +168,8 @@ pub fn parse_status(addr: &SocketAddr, msg: &CtrlMsg) -> Option<StatusSnapshot> 
                 fifo_len: *fifo_full_cnt >> 16,
                 fifo_max: *fifo_full_cnt & 0xffff,
                 smp_rate: *smp_rate,
+                smp_bits: *smp_bits,
+                iq_mode: *iq_mode,
                 fan_pulse_cnt: *fan_pulse_cnt,
                 over_voltage_state: *over_voltage_state,
                 over_range_state: *over_range_state,
@@ -218,7 +226,7 @@ pub fn cmd_stream_stop() -> CtrlMsg {
     CtrlMsg::StreamStop { msg_id: 0 }
 }
 pub fn cmd_reboot() -> CtrlMsg {
-    CtrlMsg::Reboot { msg_id: 0 }
+    CtrlMsg::Reboot { msg_id: 0, mode: 0 }
 }
 pub fn cmd_clr_ov() -> CtrlMsg {
     CtrlMsg::ClrOv { msg_id: 0 }
