@@ -466,7 +466,8 @@ async fn set_qsfp(st: State<SharedState>, Json(req): Json<QsfpSetReq>) -> Result
 }
 async fn cmd_mixer(st: State<SharedState>, Json(req): Json<MixerReq>) -> Result<Json<SummaryView>, ApiError> {
     let r = run_cmd(&st, control::cmd_mixer(req.freq_mhz, req.sync)).await?;
-    // 联动：本振 LO = 用户设置的 freq_mhz（负值由设备端取负 → LO显示取正）。
+    // 联动：本振 LO = 用户设置的 freq_mhz（正值原样下发，取负由设备端
+    // reset_mixer() 做一次；频谱 x 轴映射 RF = lo_mhz + 基带频率 不受影响）。
     {
         let mut cfg = st.config.write().unwrap();
         cfg.lo_mhz = req.freq_mhz;

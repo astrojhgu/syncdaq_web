@@ -235,7 +235,11 @@ pub fn cmd_mixer(freq_mhz: f64, sync: u32) -> CtrlMsg {
     CtrlMsg::MixerSet {
         msg_id: 0,
         nports: 8,
-        freq: vec![-freq_mhz; 8],
+        // 一律送**正**的本振频率：-Q 由 FPGA 侧的 reset_mixer()
+        // （各工程 sw/daq_sys/src/rfdc.c）统一取负一次实现。
+        // PL 的 "Invert Q Output" 在 Vivado/Vitis 2025.2 上会被
+        // XRFdc_SetFineMixer() 覆盖掉，不能依赖。
+        freq: vec![freq_mhz; 8],
         phase: vec![0.0; 8],
         sync,
     }
@@ -321,7 +325,8 @@ pub fn default_init_commands(
     cmds.push(CtrlMsg::MixerSet {
         msg_id: 0,
         nports: 8,
-        freq: vec![-mixer_freq_mhz; 8],
+        // 同 cmd_mixer()：送正值，-Q 由 FPGA 侧 reset_mixer() 取负一次完成。
+        freq: vec![mixer_freq_mhz; 8],
         phase: vec![0.0; 8],
         sync: 1,
     });
