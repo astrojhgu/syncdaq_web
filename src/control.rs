@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use syncdaq::ctrl_msg::{CmdReplySummary, CtrlMsg, Health, send_cmd};
+use syncdaq::ctrl_msg::{CmdReplySummary, CtrlMsg, send_cmd};
 use syncdaq::device_discovery::{self, DeviceInfo};
 
 pub fn enumerate() -> std::io::Result<Vec<SocketAddr>> {
@@ -79,9 +79,17 @@ impl From<CmdReplySummary> for SummaryView {
 
 #[derive(Serialize, Clone)]
 pub struct HealthView {
+    /// sw 编译时间（本地时区字符串，解码自 QueryReply._z）
+    pub sw_build_time: String,
     pub rfdc_restart_cnt: u32,
     pub temperature: f32,
     pub nports: u32,
+    /// boot 模式原始值
+    pub boot_mode: u32,
+    /// boot 模式名（JTAG/QSPI32/SD0…）
+    pub boot_mode_name: String,
+    /// 开机运行时长（秒）
+    pub uptime_s: u32,
     /// 当前 fifo 占用数（fifo_full_cnt 高 16 位）
     pub fifo_len: u32,
     /// 历史最大 fifo 占用数（fifo_full_cnt 低 16 位，仅重启复位）
@@ -127,26 +135,26 @@ pub fn parse_status(addr: &SocketAddr, msg: &CtrlMsg) -> Option<StatusSnapshot> 
         tick_cnt2,
         trans_state,
         locked,
-        health,
+        _z,
+        rfdc_restart_cnt,
+        temperature,
+        nports,
+        boot_mode,
+        uptime_s,
+        fifo_full_cnt,
+        over_voltage_state,
+        over_range_state,
+        smp_rate,
+        smp_bits,
+        iq_mode,
+        fan_pulse_cnt,
+        pkt_cnt1,
+        axi_frame_cnt1,
+        pkt_cnt2,
+        axi_frame_cnt2,
     } = msg
     {
         let (fm_year, fm_month, fm_day, fm_hour, fm_minute, fm_second) = unpack_fm_ver(*fm_ver);
-        let Health::T510Health {
-            rfdc_restart_cnt,
-            temperature,
-            nports,
-            fifo_full_cnt,
-            over_voltage_state,
-            over_range_state,
-            smp_rate,
-            smp_bits,
-            iq_mode,
-            fan_pulse_cnt,
-            pkt_cnt1,
-            axi_frame_cnt1,
-            pkt_cnt2,
-            axi_frame_cnt2,
-        } = health;
         Some(StatusSnapshot {
             addr: addr.to_string(),
             fm_year,
@@ -162,9 +170,13 @@ pub fn parse_status(addr: &SocketAddr, msg: &CtrlMsg) -> Option<StatusSnapshot> 
             sd_lock_ok: locked & 0x00_00_00_0f == 0x0f,
             tick_ok: *tick_cnt2 - *tick_cnt1 == 10_000_000,
             health: HealthView {
+                sw_build_time: sw_build_time_local(*_z),
                 rfdc_restart_cnt: *rfdc_restart_cnt,
                 temperature: *temperature,
                 nports: *nports,
+                boot_mode: *boot_mode,
+                boot_mode_name: boot_mode_name(*boot_mode).to_string(),
+                uptime_s: *uptime_s,
                 fifo_len: *fifo_full_cnt >> 16,
                 fifo_max: *fifo_full_cnt & 0xffff,
                 smp_rate: *smp_rate,
@@ -182,6 +194,38 @@ pub fn parse_status(addr: &SocketAddr, msg: &CtrlMsg) -> Option<StatusSnapshot> 
         })
     } else {
         None
+    }
+}
+
+/// boot 模式名（与 syncdaq 的 boot_mode_name 一致）。
+fn boot_mode_name(m: u32) -> &'static str {
+    match m & 0xF {
+        0 => "JTAG",
+        1 => "QSPI24",
+        2 => "QSPI32",
+        3 => "SD0(1.8V)",
+        4 => "NAND",
+        5 => "SD1",
+        6 => "MMC",
+        7 => "USB",
+        8 => "EMMC",
+        14 => "SD0(3.0V)",
+        _ => "?",
+    }
+}
+
+/// 解码 sw 编译时间位域（UTC），转本地时区显示。位域同 fm_ver。
+fn sw_build_time_local(z: u32) -> String {
+    let day = (z >> 27) & 0x1F;
+    let month = (z >> 23) & 0x0F;
+    let year = 2000 + ((z >> 17) & 0x3F);
+    let hour = (z >> 12) & 0x1F;
+    let minute = (z >> 6) & 0x3F;
+    let second = z & 0x3F;
+    use chrono::{Local, TimeZone, Utc};
+    match Utc.with_ymd_and_hms(year as i32, month, day, hour, minute, second).single() {
+        Some(dt) => dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string(),
+        None => format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC"),
     }
 }
 

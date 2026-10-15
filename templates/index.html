@@ -239,6 +239,9 @@ function renderStatus(s){
   const rows = [
     ['地址', s.addr],
     ['固件', `${s.fm_year}-${String(s.fm_month).padStart(2,'0')}-${String(s.fm_day).padStart(2,'0')} ${String(s.fm_hour).padStart(2,'0')}:${String(s.fm_minute).padStart(2,'0')}:${String(s.fm_second).padStart(2,'0')}`],
+    ['sw 编译时间', s.health.sw_build_time],
+    ['boot 模式', s.health.boot_mode+' ('+s.health.boot_mode_name+')'],
+    ['运行时长', s.health.uptime_s+' s'],
     ['tick_cnt1', s.tick_cnt1],
     ['tick_cnt2', s.tick_cnt2],
     ['tick 差 10M', s.tick_ok?'OK':'异常'],
