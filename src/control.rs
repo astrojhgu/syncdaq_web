@@ -1,17 +1,293 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::collections::{BTreeSet, HashSet};
+use std::io::Cursor;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
 
+use binrw::{BinRead, BinWrite};
 use serde::Serialize;
 
 use syncdaq::ctrl_msg::{CmdReplySummary, CtrlMsg, send_cmd};
+use syncdaq::default_cfg::DEFAULT_CTRL_PORT;
 use syncdaq::device_discovery::{self, DeviceInfo};
 
-pub fn enumerate() -> std::io::Result<Vec<SocketAddr>> {
-    device_discovery::enumerate_device_addr()
+/// 一次发现最多单播多少个目标（本机广播地址 + 各配置网段展开出的主机地址）。
+/// 上限用于挡住把 `discover_subnets` 误配成 /16 之类后一次喷出几万个包的情况：
+/// 512 大约够 2 个 /24 网段（其余是广播地址）。
+pub const MAX_DISCOVER_TARGETS: usize = 512;
+
+/// 配置网段允许的前缀范围：≥/24（一段最多 254 个主机），≤/30（再小就没有可用主机）。
+const MIN_SCAN_PREFIX: u8 = 24;
+const MAX_SCAN_PREFIX: u8 = 30;
+
+/// 发现时等待回复的时间。设备 RTT 实测 ~2ms，1.5s 足够覆盖最慢的一条路径。
+const DISCOVER_TIMEOUT_MS: u64 = 1500;
+
+/// 一次“发现”的展开结果。
+#[derive(Debug, Default)]
+pub struct DiscoverPlan {
+    /// 要发 Query 的单播目标（广播地址也在其中，`query_many` 会开 SO_BROADCAST）。
+    pub targets: Vec<SocketAddr>,
+    /// 实际展开扫描的网段（人类可读，用于日志/提示）。
+    pub subnets: Vec<String>,
+    /// 被跳过的项及原因（人类可读，用于日志/提示）。
+    pub notes: Vec<String>,
 }
 
+/// 展开一次“发现”的全部单播目标：
+/// 1) 本机每个非 loopback 网卡的广播地址 —— 覆盖同子网设备（与原行为一致；广播不跨网段，
+///    所以这里**不**逐 IP 展开本机 /24：广播已覆盖，逐 IP 只会白刷一轮 ARP）；
+/// 2) `extra_subnets` 里显式配置的网段/单机地址 —— 逐 IP 单播，跨网段发现靠这条，
+///    例如设备被单位 DHCP 分到 `10.11.1.138` 时填 `10.11.1.0/24`。
+///
+/// 广播之外一律走单播，所以只要 IP 路由可达，设备就能被发现。
+pub fn discover_plan(extra_subnets: &[String]) -> Result<DiscoverPlan, String> {
+    let mut plan = DiscoverPlan::default();
+    let mut targets: BTreeSet<SocketAddr> = BTreeSet::new();
+    let mut local_ips: HashSet<Ipv4Addr> = HashSet::new();
+    let mut broadcasts: Vec<Ipv4Addr> = Vec::new();
+
+    for iface in
+        device_discovery::list_iface_broadcasts().map_err(|e| format!("枚举本机网卡失败: {e}"))?
+    {
+        local_ips.insert(iface.ip);
+        broadcasts.push(iface.broadcast);
+        targets.insert(SocketAddr::V4(SocketAddrV4::new(iface.broadcast, DEFAULT_CTRL_PORT)));
+    }
+    if !broadcasts.is_empty() {
+        plan.notes.push(format!(
+            "本机广播目标：{}",
+            broadcasts.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    for raw in extra_subnets {
+        let s = raw.trim();
+        if s.is_empty() {
+            continue;
+        }
+        match s.split_once('/') {
+            // 裸 IPv4 ⇒ 视作单个目标（/32），方便直接钉住一台设备
+            None => match s.parse::<Ipv4Addr>() {
+                Ok(ip) => {
+                    if !local_ips.contains(&ip) {
+                        targets.insert(SocketAddr::V4(SocketAddrV4::new(ip, DEFAULT_CTRL_PORT)));
+                    }
+                    plan.subnets.push(format!("{ip}/32 [配置]"));
+                }
+                Err(_) => plan.notes.push(format!("跳过 {s:?}：既不是 CIDR 网段也不是 IPv4 地址")),
+            },
+            Some((addr, plen)) => {
+                let ip = addr
+                    .trim()
+                    .parse::<Ipv4Addr>()
+                    .map_err(|_| format!("discover_subnets 非法 IPv4: {addr:?}"))?;
+                let prefix: u8 = plen
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("discover_subnets 非法前缀长度: {plen:?}"))?;
+                if !(MIN_SCAN_PREFIX..=MAX_SCAN_PREFIX).contains(&prefix) {
+                    plan.notes.push(format!(
+                        "跳过 {s:?}：只扫描 /{MIN_SCAN_PREFIX}../{MAX_SCAN_PREFIX} 的网段（一次最多 254 个目标）"
+                    ));
+                    continue;
+                }
+                let mask = prefix_mask(prefix);
+                let net = Ipv4Addr::from(u32::from(ip) & mask);
+                plan.subnets.push(format!("{net}/{prefix} [配置]"));
+                for h in hosts_in(net, prefix) {
+                    if !local_ips.contains(&h) {
+                        targets.insert(SocketAddr::V4(SocketAddrV4::new(h, DEFAULT_CTRL_PORT)));
+                    }
+                }
+            }
+        }
+    }
+
+    if targets.len() > MAX_DISCOVER_TARGETS {
+        return Err(format!(
+            "发现目标过多（{} > {MAX_DISCOVER_TARGETS}）：请收窄 discover_subnets",
+            targets.len()
+        ));
+    }
+    plan.targets = targets.into_iter().collect();
+    Ok(plan)
+}
+
+/// 向多个目标单播 `Query` 并收集应答地址。
+///
+/// 不复用 `syncdaq::ctrl_msg::send_cmd`：它把 socket 设成非阻塞后对每个目标
+/// `send_to(...).expect(...)`，而扫一个**直连** /24 时 253 个目标各有各的下一跳，
+/// 内核 ARP 未解析队列会被灌满，`send_to` 直接返回 EAGAIN 把一个后台线程 panic 掉。
+/// 这里对 EAGAIN 做小睡重试、对个体失败只记录不 panic，并在发送间隙限速。
+fn query_many(targets: &[SocketAddr], timeout: Duration) -> (Vec<SocketAddr>, Vec<String>) {
+    let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+        Ok(s) => s,
+        Err(e) => return (Vec::new(), vec![format!("绑定本地 UDP 端口失败: {e}")]),
+    };
+    let _ = socket.set_broadcast(true);
+    let _ = socket.set_read_timeout(Some(timeout));
+    let _ = socket.set_nonblocking(true);
+
+    let mut pending: BTreeSet<u32> = BTreeSet::new();
+    let mut send_failed = 0usize;
+    for (i, target) in targets.iter().enumerate() {
+        let msg_id = i as u32 + 1;
+        let cmd = CtrlMsg::Query { msg_id };
+        let mut cursor = Cursor::new(Vec::new());
+        if cmd.write(&mut cursor).is_err() {
+            send_failed += 1;
+            continue;
+        }
+        let buf = cursor.into_inner();
+
+        let mut tries = 0;
+        loop {
+            match socket.send_to(&buf, target) {
+                Ok(_) => {
+                    pending.insert(msg_id);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && tries < 10 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => {
+                    send_failed += 1;
+                    break;
+                }
+            }
+        }
+        // 限速：每个包之间间隔 ~0.8ms（258 个目标约 0.25s）。
+        // 一次性把 258 个 Query 突发出去时，路径上的风暴控制/设备侧协议栈实测会偶发丢掉
+        // 那唯一一个真正需要的回复，扫完却报「本次应答 0 台」。
+        std::thread::sleep(Duration::from_micros(800));
+    }
+
+    // 发送阶段结束后转为阻塞收（read_timeout 生效），收满或超时即止。
+    let _ = socket.set_nonblocking(false);
+    let mut buf = vec![0_u8; 9000];
+    let mut replies: Vec<SocketAddr> = Vec::new();
+    let mut undecodable = 0usize;
+    let mut stale = 0usize;
+    let mut recv_err: Option<std::io::Error> = None;
+    while !pending.is_empty() {
+        let (len, from) = match socket.recv_from(&mut buf) {
+            Ok(v) => v,
+            // 超时（正常收工）或其它错误（异常，记下来）
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::WouldBlock && e.kind() != std::io::ErrorKind::TimedOut {
+                    recv_err = Some(e);
+                }
+                break;
+            }
+        };
+        let mut cursor = Cursor::new(&buf[..len]);
+        // 非本协议的杂包/空包直接忽略——宁可漏一个目标，也不能 panic
+        let Ok(msg) = CtrlMsg::read(&mut cursor) else {
+            undecodable += 1;
+            continue;
+        };
+        if pending.remove(&msg.get_msg_id()) {
+            if parse_status(&from, &msg).is_some() {
+                replies.push(from);
+            }
+        } else {
+            stale += 1;
+        }
+    }
+    replies.sort();
+    replies.dedup();
+
+    let mut notes = Vec::new();
+    if let Some(e) = recv_err {
+        notes.push(format!("收包中断: {e}"));
+    }
+    if undecodable > 0 || stale > 0 {
+        notes.push(format!(
+            "收到 {undecodable} 个无法解码的包、{stale} 个 msg_id 对不上的包（已忽略）"
+        ));
+    }
+    if send_failed > 0 {
+        notes.push(format!(
+            "{send_failed} 个目标未能发出（内核发送队列/ARP 队列满，已跳过）"
+        ));
+    }
+    (replies, notes)
+}
+
+/// 执行一次发现：把广播目标与扫描目标一起单播 Query，返回回复的设备地址与过程说明。
+///
+/// 回复按地址去重排序；`notes` 供调用方打日志/提示（哪些网段跳过了、扫了多少目标）。
+pub fn discover(extra_subnets: &[String]) -> Result<(Vec<SocketAddr>, Vec<String>), String> {
+    let plan = discover_plan(extra_subnets)?;
+    let mut notes = plan.notes;
+    if plan.targets.is_empty() {
+        notes.push("没有可扫描的目标（本机无可用网卡且 discover_subnets 为空）".to_string());
+        return Ok((Vec::new(), notes));
+    }
+    let (addrs, send_notes) = query_many(&plan.targets, Duration::from_millis(DISCOVER_TIMEOUT_MS));
+    notes.extend(send_notes);
+    notes.push(format!(
+        "扫描 {} 个目标（{}），本次应答 {} 台",
+        plan.targets.len(),
+        if plan.subnets.is_empty() { "-".to_string() } else { plan.subnets.join(", ") },
+        addrs.len()
+    ));
+    Ok((addrs, notes))
+}
+
+/// 网段内可用主机地址（去掉网络号与广播地址）。
+fn hosts_in(net: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
+    let mask = prefix_mask(prefix);
+    let net_u = u32::from(net) & mask;
+    let bcast = net_u | !mask;
+    ((net_u + 1)..bcast).map(Ipv4Addr::from).collect()
+}
+
+fn prefix_mask(prefix: u8) -> u32 {
+    if prefix == 0 { 0 } else { u32::MAX << (32 - prefix as u32) }
+}
+
+/// 查询指定设备的控制信息与各 port 的收包地址（**不经广播**）。
+///
+/// `syncdaq::device_discovery::get_device_info` 内部靠 `enumerate_device_addr()`（二层广播）
+/// 先把设备找出来，设备一旦被 DHCP 分到别的网段就永远返回 `None`，采集会直接报
+/// "no device info for this ip" —— 连设备的 XGbe 配置都没机会读到。
+/// 这里改成直接单播 `XGbeCfgQuery` 到 `ip:3000`：控制面既然路由可达就够了。
+///
+/// payload 地址的判据是**该 port 的 `dst_ip` 是否属于本机某张网卡**（这正是收包时要 bind 的地址）；
+/// 不校验 `dst_mac`：跨网段时那是网关的 MAC，同网段时才是本机网卡 MAC，两种情况都不影响 bind。
 pub fn get_device_info(ip: Ipv4Addr) -> Option<DeviceInfo> {
-    device_discovery::get_device_info(ip)
+    let target = SocketAddr::new(std::net::IpAddr::V4(ip), DEFAULT_CTRL_PORT);
+    let cfg = xgbe_cfg(target, 0, DISCOVER_TIMEOUT_MS).ok()?;
+
+    let local_ips = local_ipv4_addrs();
+    let mut foreign = 0usize;
+    let payload_addr = cfg
+        .iter()
+        .map(|c| {
+            let dst = Ipv4Addr::from(c.dst_ip);
+            if dst.is_unspecified() || !local_ips.contains(&dst) {
+                foreign += 1;
+                return None;
+            }
+            Some(SocketAddrV4::new(dst, c.dst_port))
+        })
+        .collect();
+    if foreign > 0 {
+        tracing::warn!(
+            "{ip}: {foreign} 个 XGbe port 的 dst_ip 不属于本机网卡（本机地址: {:?}），这些 port 不会收包",
+            local_ips
+        );
+    }
+    Some(DeviceInfo { ctrl_addr: target, payload_addr })
+}
+
+/// 本机当前所有 IPv4 地址（非 loopback）。收包前用它判断设备的数据目标是不是发给本机的。
+pub fn local_ipv4_addrs() -> HashSet<Ipv4Addr> {
+    device_discovery::list_iface_broadcasts()
+        .map(|v| v.into_iter().map(|i| i.ip).collect())
+        .unwrap_or_default()
 }
 
 pub fn send(

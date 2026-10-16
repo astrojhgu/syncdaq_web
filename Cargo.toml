@@ -6,6 +6,9 @@ description = "syncdaq control dashboard + short-segment capture/FFT spectrum"
 
 [dependencies]
 syncdaq = { path = "../syncdaq" }
+# 只为手工编码/解码 CtrlMsg（syncdaq::ctrl_msg 未 re-export binrw）；
+# 版本与 ../syncdaq 一致，不引入新的 crate 版本。
+binrw = "0.15.2"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
