@@ -35,6 +35,9 @@ use config::Config;
 use control::{StatusSnapshot, SummaryView};
 use settings::{DeviceSettings, DsaSetting, QsfpSetting, XgbePortSetting};
 
+/// 手工添加设备时单播 Query 的等待时间：设备 RTT 实测 ~2ms，1.5s 足够。
+const ADD_DEVICE_PROBE_MS: u64 = 1500;
+
 // ---------------------------------------------------------------- state
 
 #[derive(Clone, Serialize)]
@@ -187,6 +190,11 @@ struct ClkReq {
 struct SelectReq {
     addr: String,
 }
+/// 手工添加设备（单播 Query 验证在线）。
+#[derive(Deserialize)]
+struct AddDeviceReq {
+    addr: String,
+}
 #[derive(Deserialize)]
 struct CaptureRequest {
     device_ip: Option<String>,
@@ -238,26 +246,71 @@ async fn put_config(st: State<SharedState>, Json(cfg): Json<Config>) -> Json<Con
     Json(cfg)
 }
 
-async fn discover(st: State<SharedState>) -> Result<Json<Vec<DeviceEntry>>, ApiError> {
+/// 把地址并入服务器端设备列表（按 ctrl_addr 去重），返回合并后的列表。
+fn upsert_devices(st: &SharedState, addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<DeviceEntry> {
+    let mut devs = st.devices.write().unwrap_or_else(|e| e.into_inner());
+    let mut seen: std::collections::HashSet<String> =
+        devs.iter().map(|d| d.ctrl_addr.clone()).collect();
+    for a in addrs {
+        if seen.insert(a.to_string()) {
+            devs.push(DeviceEntry { ctrl_addr: a.to_string(), ip: a.ip().to_string(), port: a.port() });
+        }
+    }
+    devs.clone()
+}
+
+/// 发现设备：本机各网卡广播（覆盖同子网）+ `discover_subnets` 里配置的网段逐 IP 单播。
+/// 跨网段时广播出不去，靠的就是那些单播。
+/// 返回 `{devices, notes}`：notes 说明扫了哪些网段、哪些被跳过（配错时一眼可见）。
+async fn discover(st: State<SharedState>) -> Result<Json<serde_json::Value>, ApiError> {
+    let subnets = st.config.read().unwrap().discover_subnets.clone();
     let lock = st.ctrl_lock.clone();
-    let list = tokio::task::spawn_blocking(move || {
+    let (addrs, notes) = tokio::task::spawn_blocking(move || {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-        control::enumerate()
+        control::discover(&subnets)
     })
     .await
     .map_err(|e| ApiError::internal(format!("discover task: {e}")))?
-    .map_err(|e| ApiError::internal(format!("discover: {e}")))?;
+    .map_err(ApiError::internal)?;
 
-    let mut seen: std::collections::HashSet<String> =
-        st.devices.read().unwrap().iter().map(|d| d.ctrl_addr.clone()).collect();
-    for addr in list {
-        let ip = addr.ip().to_string();
-        let port = addr.port();
-        if seen.insert(addr.to_string()) {
-            st.devices.write().unwrap().push(DeviceEntry { ctrl_addr: addr.to_string(), ip, port });
+    for n in &notes {
+        tracing::info!("discover: {n}");
+    }
+    let devs = upsert_devices(&st, addrs);
+    let _ = st.ws_tx.send(WsMsg::Devices { devices: devs.clone() });
+    Ok(Json(serde_json::json!({ "devices": devs, "notes": notes })))
+}
+
+/// 手工添加设备：先单播 Query 验证在线，通过后才写入设备列表并持久化到 config。
+/// 跨网段（广播不可达）时这是兜底入口——只要 IP 路由可达就能用。
+async fn add_device(st: State<SharedState>, Json(req): Json<AddDeviceReq>) -> Result<Json<Vec<DeviceEntry>>, ApiError> {
+    let target = control::parse_target(&req.addr).map_err(ApiError::bad)?;
+    let lock = st.ctrl_lock.clone();
+    let probe = tokio::task::spawn_blocking(move || {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        control::send(control::cmd_query(), target, 0, ADD_DEVICE_PROBE_MS, 0)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("probe task: {e}")))?;
+
+    if !probe.normal_reply.iter().any(|(a, m)| control::parse_status(a, m).is_some()) {
+        return Err(ApiError::bad(format!(
+            "{} 未回复 Query（no_reply={} invalid={}）：地址不对、设备离线，或本机到该地址没有路由",
+            req.addr,
+            probe.no_reply.len(),
+            probe.invalid_reply.len()
+        )));
+    }
+
+    let key = target.to_string();
+    {
+        let mut cfg = st.config.write().unwrap_or_else(|e| e.into_inner());
+        if !cfg.manual_devices.iter().any(|a| a == &key) {
+            cfg.manual_devices.push(key);
+            cfg.save();
         }
     }
-    let devs = st.devices.read().unwrap().clone();
+    let devs = upsert_devices(&st, [target]);
     let _ = st.ws_tx.send(WsMsg::Devices { devices: devs.clone() });
     Ok(Json(devs))
 }
@@ -925,7 +978,14 @@ async fn main() {
 
     let st: SharedState = Arc::new(AppState {
         config: RwLock::new(cfg.clone()),
-        devices: RwLock::new(Vec::new()),
+        // 启动时把持久化的手工设备回填进列表（不校验在线：页面一打开就能选）
+        devices: RwLock::new(
+            cfg.manual_devices
+                .iter()
+                .filter_map(|s| s.parse::<SocketAddr>().ok())
+                .map(|a| DeviceEntry { ctrl_addr: a.to_string(), ip: a.ip().to_string(), port: a.port() })
+                .collect(),
+        ),
         status: RwLock::new(None),
         ws_tx,
         captures: Mutex::new(std::collections::HashMap::new()),
@@ -940,6 +1000,7 @@ async fn main() {
         .route("/api/settings", get(get_settings))
         .route("/api/discover", post(discover))
         .route("/api/devices", get(get_devices))
+        .route("/api/device/add", post(add_device))
         .route("/api/select", post(select_device))
         .route("/api/init", post(do_init))
         .route("/api/status", post(do_status))

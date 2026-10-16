@@ -63,6 +63,8 @@
       <button id="selectInitBtn" class="primary">选择并初始化</button>
     </div>
     <div class="row" style="margin-top:.5rem">
+      <input id="manualAddr" placeholder="跨网段设备地址 ip:3000" style="width:13rem">
+      <button id="addDevBtn">添加并验证</button>
       <button id="statusBtn">刷新状态</button>
     </div>
     <div id="devHint" style="font-size:.72rem;color:#9db6e0;margin-top:.4rem"></div>
@@ -425,8 +427,24 @@ function fillDeviceSel(devs, autoselectLast){
   else if(autoselectLast && devs && devs.length){ sel.value=devs[devs.length-1].ctrl_addr; }
 }
 async function discover(){
-  try{ const devs=await api('/api/discover'); fillDeviceSel(devs, true); logOk('发现 '+devs.length+' 设备'); }
+  try{
+    const r=await api('/api/discover');
+    const devs=r.devices||[];
+    fillDeviceSel(devs, true);
+    (r.notes||[]).forEach(n=>log('· '+n));
+    logOk('发现 '+devs.length+' 设备');
+  }
   catch(e){ logErr('发现失败: '+e.message); }
+}
+async function addDevice(){
+  const addr=$('manualAddr').value.trim();
+  if(!addr){ logErr('请输入设备地址，形如 10.11.1.138:3000'); return; }
+  try{
+    const devs=await api('/api/device/add',{addr});
+    fillDeviceSel(devs, false);
+    const sel=$('deviceSel'); if(sel) sel.value=addr;
+    logOk('已添加并验证 '+addr);
+  }catch(e){ logErr('添加失败: '+e.message); }
 }
 async function selectAndInit(){
   const addr=$('deviceSel').value;
@@ -450,6 +468,7 @@ async function cmd(name,body){ try{ const r=await api('/api/cmd/'+name, body); c
  function bindButton(id, fn){ $(id).addEventListener('click', fn); }
 
 bindButton('discover', discover);
+bindButton('addDevBtn', addDevice);
 bindButton('selectInitBtn', selectAndInit);
 bindButton('statusBtn', ()=>api('/api/status').then(logOk).catch(e=>logErr('状态: '+e.message)));
 bindButton('syncBtn', ()=>cmd('sync'));

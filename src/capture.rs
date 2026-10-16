@@ -205,28 +205,43 @@ fn capture_inner(
     let mut ports: Vec<(usize, SocketAddrV4)> = Vec::new();
     let mut enabled_ports = Vec::new();
     let mut skipped_ports = Vec::new();
+    // 设备在发、但目标地址不属于本机的 port：单独记下来，用于给出可诊断的错误
+    let mut foreign_dst: Vec<String> = Vec::new();
     for i in 0..8 {
         let mac0 = cfg.get(i).map(|c| c.dst_mac == [0u8; 6]).unwrap_or(true);
-        let pa = info.payload_addr.get(i).and_then(|o| o.clone());
         if mac0 {
             skipped_ports.push(i);
             continue;
         }
-        // 使能：优先用 host 已匹配的 payload 地址；否则退回 cfg 给出的 dst（主机可能仍有该接口）。
-        let addr = match pa {
-            Some(a) => a,
-            None => match cfg.get(i) {
-                Some(c) => SocketAddrV4::new(Ipv4Addr::from(c.dst_ip), c.dst_port),
-                None => {
-                    skipped_ports.push(i);
-                    continue;
+        // payload 地址来自 control::get_device_info，已确认属于本机某张网卡（这正是要 bind 的地址）。
+        // 不能退回 cfg 里的 dst_ip 去 bind：那个地址既然不在本机，bind 必然 EADDRNOTAVAIL，
+        // 只会抛出看不出任何原因的 "os error 99"。
+        match info.payload_addr.get(i).and_then(|o| o.clone()) {
+            Some(a) => {
+                enabled_ports.push(i);
+                ports.push((i, a));
+            }
+            None => {
+                if let Some(c) = cfg.get(i) {
+                    foreign_dst.push(format!(
+                        "{}.{}.{}.{}:{}",
+                        c.dst_ip[0], c.dst_ip[1], c.dst_ip[2], c.dst_ip[3], c.dst_port
+                    ));
                 }
-            },
-        };
-        enabled_ports.push(i);
-        ports.push((i, addr));
+                skipped_ports.push(i);
+            }
+        }
     }
     if ports.is_empty() {
+        if !foreign_dst.is_empty() {
+            return Err(format!(
+                "设备已使能端口，但它的数据目标是 {:?}，而本机当前地址是 {:?} —— 两者对不上，无法收包。\
+                 最常见的两种原因：(1) 该网段的网线/接口 down（地址已被撤销，`ip -br addr` 里看不到它）；\
+                 (2) 设备侧 XGbe 的 dst_ip/dst_mac 仍指向旧地址。",
+                foreign_dst,
+                crate::control::local_ipv4_addrs()
+            ));
+        }
         return Err(
             "所有 Xgbe port 的 dst_mac 均为 0，设备未使能任何数据通路（或未完成初始化）".into(),
         );

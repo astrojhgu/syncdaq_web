@@ -39,6 +39,15 @@ pub struct Config {
     /// 最近选中的设备控制地址，形如 "10.100.11.20:3000"。
     #[serde(default)]
     pub selected_device: Option<String>,
+    /// 逐 IP 单播扫描的额外网段（CIDR，形如 "10.11.1.0/24"）或单个地址（"10.11.1.138"）。
+    /// 同子网设备由本机网卡的广播覆盖，无需写本机网段；这里填的是**跨网段**的设备网段——
+    /// 例如设备被单位 DHCP 分到 10.11.1.138，而本机在 WiFi 的另一个网段时，填 "10.11.1.0/24"。
+    /// 只支持 /24../30（一段最多 254 个目标）。
+    #[serde(default)]
+    pub discover_subnets: Vec<String>,
+    /// 手工添加并验证过的设备控制地址（"ip:port"），持久化，重启后仍回填到设备列表。
+    #[serde(default)]
+    pub manual_devices: Vec<String>,
     /// 是否已完成初始化（成功下发过 Init）——用于页面 banner 提示。
     #[serde(default)]
     pub initialized: bool,
@@ -55,6 +64,8 @@ impl Default for Config {
             clock_source: default_clock_source(),
             lo_mhz: default_lo_mhz(),
             selected_device: None,
+            discover_subnets: Vec::new(),
+            manual_devices: Vec::new(),
             initialized: false,
             capture: CaptureDefaults::default(),
         }
