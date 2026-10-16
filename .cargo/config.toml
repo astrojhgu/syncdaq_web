@@ -1,0 +1,9 @@
+# 本工程自身没写 generic_const_exprs，但依赖 path 上的 ../syncdaq，编译
+# syncdaq_web 本 crate 时（typeck capture::capture_inner）要实例化
+# payload::Payload<Complex<i16>>，仍会撞上同一个 rustc ICE。
+# cargo 只读取「调用目录向上」的 .cargo/config.toml，读不到 ../syncdaq 那份，
+# 且 include 的相对路径按 cwd 解析、不能跨出当前目录，故在此显式重复一份。
+# 上游修复（或改掉 Payload 的泛型 const 表达式）后，两份一起删。
+# 详见 ../syncdaq/.cargo/config.toml 的注释。
+[build]
+rustflags = ["-Znext-solver=no"]
