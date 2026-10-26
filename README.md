@@ -7,11 +7,11 @@
 ## 功能
 
 - **设备发现与选择**：**广播 + 主动单播扫描**两条腿——广播覆盖同子网设备，`discover_subnets` 里配的网段（如 `10.11.1.0/24`）走单播逐地址 `Query`，因此**设备被 DHCP 分到别的网段也能发现**；另有「添加并验证」输入框可手工钉一个 `ip:port`（先单播 `Query` 确认在线再入列表，持久化到 config）。
-- **一键初始化**：按“设备当前 XGbe 配置”重放 `SetClk + Sync + XGbeCfgSingle×8 + MixerSet`（时钟源、本振可配置）。命令**逐个执行、逐条经 WebSocket 推送到日志**。
+- **一键初始化**：按“设备当前 XGbe 配置”重放 `SetClk + Sync + XGbeCfgSingle×8 + SetMixer`（时钟源、本振可配置）。命令**逐个执行、逐条经 WebSocket 推送到日志**。
 - **状态监控**：`Query` 解析（固件版本、tick、locked、温度、采样率、nports、trans_state 等），WebSocket 自动刷新。
 - **控制面板**：
   - 同步：`Sync`、`StreamStart`、`StreamStop`、`ClrOv`、`Reboot`
-  - 本振：`MixerSet`（频率 + sync），并与频谱 x 轴联动
+  - 本振：`SetMixer`（频率 + sync），并与频谱 x 轴联动
   - 时钟源：`SetClk`（`gps`=板上 GPS 10M+PPS / `ext_clk`=外接同轴 10M+PPS）
   - 增益：DSA，逐端口查询/设置（表格化）
   - QSFP：状态查询 + 设置（`cdr_ctrl` 8bit 十六进制、`eq_ctrl`/`adapt_eq` 各 4 通道）
@@ -54,7 +54,7 @@ SYNCDAQ_WEB_ADDR=0.0.0.0:8000 ./target/debug/syncdaq_web
 
 ```yaml
 local_ctrl_port: 3001      # 是否使用：控制通道实际用临时端口，此处为兼容保留
-timeout_ms: 5000           # 控制命令超时（Sync/MixerSet 实际约需 3s，故取 5s）
+timeout_ms: 5000           # 控制命令超时（Sync/SetMixer 实际约需 3s，故取 5s）
 poll_interval_ms: 2000     # 状态轮询间隔
 clock_source: gps          # 初始化时钟源：gps | ext_clk
 lo_mhz: 360.0              # 本振（LO）频率（MHz）：频谱 x 轴偏移 + 初始化本振（混频联动）

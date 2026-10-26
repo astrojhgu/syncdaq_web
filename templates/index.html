@@ -56,7 +56,7 @@
   <!-- 设备与初始化 -->
   <section class="card">
     <h2>设备</h2>
-    <div id="initBanner" class="banner">⚠️ 请先初始化设备：点击下方『初始化』（按设备当前 Xgbe 配置重放 SetClk/Sync/XGbeCfg/MixerSet）。</div>
+    <div id="initBanner" class="banner">⚠️ 请先初始化设备：点击下方『初始化』（按设备当前 Xgbe 配置重放 SetClk/Sync/XGbeCfg/SetMixer）。</div>
     <div class="row">
       <button id="discover" class="primary">发现设备</button>
       <select id="deviceSel"></select>
@@ -678,7 +678,7 @@ function renderUiState(cfg, settings){
     if(cfg){ currentSelected = cfg.selected_device||null;
       // 初始化 banner 反映服务器状态
       if(cfg.initialized){ $('initBanner').className='banner ok'; $('initBanner').textContent='✔️ 已初始化；如已配置好数据通路可开始抓取。'; }
-      else { $('initBanner').className='banner'; $('initBanner').textContent='⚠️ 请先初始化设备：点击下方『选择并初始化』（按设备当前 Xgbe 配置重放 SetClk/Sync/XGbeCfg/MixerSet）。'; }
+      else { $('initBanner').className='banner'; $('initBanner').textContent='⚠️ 请先初始化设备：点击下方『选择并初始化』（按设备当前 Xgbe 配置重放 SetClk/Sync/XGbeCfg/SetMixer）。'; }
     }
     if(cfg && cfg.selected_device && $('deviceSel')){ const sel=$('deviceSel'); if([...sel.options].some(o=>o.value===cfg.selected_device)) sel.value=cfg.selected_device; }
     if(!settings) return;

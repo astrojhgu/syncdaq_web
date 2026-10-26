@@ -528,7 +528,7 @@ pub fn cmd_label(cmd: &CtrlMsg) -> String {
         CtrlMsg::SetClk { clk_src, pps_src, .. } => format!("SetClk(clk_src={clk_src}, pps_src={pps_src})"),
         CtrlMsg::Sync { .. } => "Sync".to_string(),
         CtrlMsg::XGbeCfgSingle { port_id, .. } => format!("XGbeCfgSingle(port {port_id})"),
-        CtrlMsg::MixerSet { freq, sync, .. } => format!("MixerSet(freq={freq:?}, sync={sync})"),
+        CtrlMsg::SetMixer { freq, sync, .. } => format!("SetMixer(freq={freq:?}, sync={sync})"),
         CtrlMsg::StreamStart { .. } => "StreamStart".to_string(),
         CtrlMsg::StreamStop { .. } => "StreamStop".to_string(),
         CtrlMsg::Query { .. } => "Query".to_string(),
@@ -552,7 +552,7 @@ pub fn cmd_clr_ov() -> CtrlMsg {
     CtrlMsg::ClrOv { msg_id: 0 }
 }
 pub fn cmd_mixer(freq_mhz: f64, sync: u32) -> CtrlMsg {
-    CtrlMsg::MixerSet {
+    CtrlMsg::SetMixer {
         msg_id: 0,
         nports: 8,
         // 一律送**正**的本振频率：-Q 由 FPGA 侧的 reset_mixer()
@@ -626,7 +626,7 @@ pub fn clock_source_cfg(src: &str) -> (u32, u32) {
 ///
 /// XGbeCfg 以「设备当前配置」为基准重放（幂等、安全）：`dst_mac`/`src_mac`/ip/port
 /// 全部取自设备当前值，避免用陈旧样例里的 `dst_mac` 覆盖掉与本机匹配的现网配置。
-/// 另附 `SetClk`（按 clock_source 选 gps/ext_clk）、`Sync`、`MixerSet`。
+/// 另附 `SetClk`（按 clock_source 选 gps/ext_clk）、`Sync`、`SetMixer`。
 pub fn default_init_commands(
     device: SocketAddr,
     local_port: u16,
@@ -642,7 +642,7 @@ pub fn default_init_commands(
     for (i, c) in cfg.iter().enumerate() {
         cmds.push(CtrlMsg::XGbeCfgSingle { msg_id: 0, port_id: i as u32, cfg: c.clone() });
     }
-    cmds.push(CtrlMsg::MixerSet {
+    cmds.push(CtrlMsg::SetMixer {
         msg_id: 0,
         nports: 8,
         // 同 cmd_mixer()：送正值，-Q 由 FPGA 侧 reset_mixer() 取负一次完成。

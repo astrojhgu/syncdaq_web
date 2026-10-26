@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_LOCAL_CTRL_PORT: u16 = 3001;
-pub const DEFAULT_TIMEOUT_MS: u64 = 5000; // Sync/MixerSet 等命令实际需 ~3s，故取 5s 兜底
+pub const DEFAULT_TIMEOUT_MS: u64 = 5000; // Sync/SetMixer 等命令实际需 ~3s，故取 5s 兜底
 pub const DEFAULT_POLL_INTERVAL_MS: u64 = 2000;
 pub const DEFAULT_CAPTURE_FRAMES_PER_PORT: usize = 1000;
 pub const DEFAULT_FFT_SIZE: usize = 8192;
