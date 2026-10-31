@@ -441,12 +441,27 @@ async fn cmd_clrov(st: State<SharedState>) -> Result<Json<SummaryView>, ApiError
 async fn cmd_qsfp(st: State<SharedState>) -> Result<Json<SummaryView>, ApiError> {
     run_cmd(&st, control::cmd_qsfp_info()).await
 }
+/// 复位 QSFP 光模块：RstL 拉低 `hold_ms` 毫秒再拉高，全部由固件完成。
+/// `hold_ms = 0` 表示最小 1 ms；>500 由固件钳到 500 ms。
+async fn cmd_qsfp_reset(
+    st: State<SharedState>,
+    Json(req): Json<QsfpResetReq>,
+) -> Result<Json<SummaryView>, ApiError> {
+    run_cmd(&st, control::cmd_qsfp_reset(req.hold_ms)).await
+}
 
 #[derive(Deserialize)]
 struct QsfpSetReq {
     cdr_ctrl: u8,
     eq_ctrl: [i8; 4],
     adapt_eq: [u8; 4],
+}
+
+/// QSFP 复位请求：`hold_ms` 是 RstL 拉低时长（ms）。前端默认给 10，
+/// 0 表示固件保证的最小 1 ms，>500 由固件钳到 500 ms。
+#[derive(Deserialize)]
+struct QsfpResetReq {
+    hold_ms: u32,
 }
 
 /// 结构化 QSFP 信息：查询 QsfpInfo 并整理成便于前端展示的视图。
@@ -463,7 +478,6 @@ async fn get_qsfp(st: State<SharedState>) -> Result<Json<serde_json::Value>, Api
             .iter()
             .find_map(|(_, m)| match m {
                 CtrlMsg::QsfpInfoReply {
-                    restl,
                     modsell,
                     lpmode,
                     modpresent,
@@ -481,7 +495,6 @@ async fn get_qsfp(st: State<SharedState>) -> Result<Json<serde_json::Value>, Api
                 } => Some(serde_json::json!({
                     "modpresent": *modpresent,
                     "lpmode": *lpmode,
-                    "restl": *restl,
                     "modsell": *modsell,
                     "temperature": *temperature,
                     "vcc": *vcc,
@@ -1010,6 +1023,7 @@ async fn main() {
         .route("/api/cmd/reboot", post(cmd_reboot))
         .route("/api/cmd/clrov", post(cmd_clrov))
         .route("/api/cmd/qsfp", post(cmd_qsfp))
+        .route("/api/cmd/qsfp/reset", post(cmd_qsfp_reset))
         .route("/api/qsfp", get(get_qsfp).post(set_qsfp))
         .route("/api/cmd/mixer", post(cmd_mixer))
         .route("/api/cmd/dsa/set", post(cmd_dsa_set))

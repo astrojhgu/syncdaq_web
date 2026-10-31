@@ -576,12 +576,24 @@ pub fn cmd_set_clk(clk_src: u32, pps_src: u32) -> CtrlMsg {
 pub fn cmd_qsfp_info() -> CtrlMsg {
     CtrlMsg::QsfpInfo { msg_id: 0 }
 }
+/// 复位 QSFP 光模块：固件把 RstL 拉低 `hold_ms` 毫秒再拉高，主机不碰信号线。
+///
+/// - `hold_ms = 0` 是「最小拉低时间」（固件保证 1 ms），**不是**不复位；
+/// - 固件把 >500 钳到 500 ms：handler 持 `cmd_mutex` 跑，睡多久命令通道就堵多久；
+/// - 10 ms 是默认值（QSFP28 MSA 只要求 ≥1 µs，1 ms 对个别模块偏短）。
+///
+/// 线上 12B（magic + msg_id + hold_ms）。
+pub fn cmd_qsfp_reset(hold_ms: u32) -> CtrlMsg {
+    CtrlMsg::QsfpReset { msg_id: 0, hold_ms }
+}
 /// 构造 QsfpSet：cdr_ctrl 仅第一个元素有意义（8bit，bit0-3=rx ch1-4、bit4-7=tx ch1-4）；
-/// eq_ctrl [i8;4]、adapt_eq [u8;4] 为 4 通道各一个值；restl/modsell/lpmode 取参考默认（1/0/0）。
+/// eq_ctrl [i8;4]、adapt_eq [u8;4] 为 4 通道各一个值；modsell/lpmode 取参考默认（0/0）。
+///
+/// 不含 RstL：syncdaq 已把它从 QsfpSet 剥离成独立的 `QsfpReset` 动作（固件侧
+/// QsfpSet 是 read-modify-write，不会连带复位模块）。需要复位时另发 QsfpReset。
 pub fn cmd_qsfp_set(cdr_ctrl: u8, eq_ctrl: [i8; 4], adapt_eq: [u8; 4]) -> CtrlMsg {
     CtrlMsg::QsfpSet {
         msg_id: 0,
-        restl: 1,
         modsell: 0,
         lpmode: 0,
         cdr_ctrl: [cdr_ctrl, 0, 0, 0],

@@ -14,7 +14,7 @@
   - 本振：`SetMixer`（频率 + sync），并与频谱 x 轴联动
   - 时钟源：`SetClk`（`gps`=板上 GPS 10M+PPS / `ext_clk`=外接同轴 10M+PPS）
   - 增益：DSA，逐端口查询/设置（表格化）
-  - QSFP：状态查询 + 设置（`cdr_ctrl` 8bit 十六进制、`eq_ctrl`/`adapt_eq` 各 4 通道）
+  - QSFP：状态查询 + 设置（`cdr_ctrl` 8bit 十六进制、`eq_ctrl`/`adapt_eq` 各 4 通道）+ 复位光模块（`QsfpReset`，`hold_ms` = RstL 拉低时长；0 = 固件保证的最小 1 ms，>500 由固件钳到 500 ms）
   - 100G：XGbe 逐端口 src/dst ip/mac/port，可查询回填、批量下发
 - **谱分析 + 原始直方图**（一次“开始抓取”同时计算）：
   - **FFT 谱**：原始满带宽（带宽来自设备 `Query.health.smp_rate`），x 轴按本振偏移（`RF = LO + 基带频率`），居中显示 `LO ± fs/2`。
@@ -114,6 +114,7 @@ qsfp:
 | POST | `/api/cmd/dsa/set` `/dsa/get` | 单端口 DSA |
 | GET/POST | `/api/dsa/config` | DSA 批量查询/设置（`?nports=`） |
 | GET/POST | `/api/qsfp` | QSFP 查询（结构化）/ 设置 `{cdr_ctrl, eq_ctrl[4], adapt_eq[4]}` |
+| POST | `/api/cmd/qsfp/reset` | 复位 QSFP 光模块 `{hold_ms}`（RstL 拉低时长，0=最小 1 ms，>500 钳到 500 ms） |
 | GET/POST | `/api/xgbe/config` | XGbe 批量查询/设置 |
 | POST | `/api/cmd/xgbe/query` `/xgbe/single` | XGbe 单命令 |
 

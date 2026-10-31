@@ -135,6 +135,9 @@
     <div class="row">
       <button id="qsfpQueryBtn" class="primary">查询</button>
       <button id="qsfpSetBtn" class="primary">设置 QSFP</button>
+      <button id="qsfpResetBtn" class="danger">复位光模块</button>
+      <label style="margin:0">hold_ms</label>
+      <input id="qsfpResetHold" type="number" value="10" min="0" max="500" step="1" style="width:5rem">
       <span id="qsfpModPresent" class="mono" style="margin-left:.5rem"></span>
     </div>
     <div style="overflow-x:auto;margin-top:.3rem">
@@ -507,6 +510,21 @@ bindButton('qsfpSetBtn', async ()=>{
     clearDirty(document);
   }catch(e){ logErr('QSFP 设置失败: '+e.message); }
 });
+// 复位光模块：RstL 拉低 hold_ms 毫秒再拉高，时序在固件里（0 = 固件保证的最小 1 ms，
+// >500 由固件钳到 500 ms）。复位期间 100G 链路短时中断，模块重新应答 I2C 要几百 ms。
+bindButton('qsfpResetBtn', async ()=>{
+  const h=parseInt($('qsfpResetHold').value.trim(), 10);
+  if(isNaN(h)||h<0){ logErr('hold_ms 需为 ≥0 的整数（0 = 最小 1 ms）'); return; }
+  if(h>500){ logErr('hold_ms 超过 500 会被设备钳到 500 ms，请改小'); return; }
+  const real=h===0?1:h;
+  if(!confirm(`复位 QSFP 光模块？RstL 拉低 ${real} ms，100G 链路短时中断；复位后等 2~3 秒再查询。`)) return;
+  try{
+    const r=await api('/api/cmd/qsfp/reset', {hold_ms:h});
+    const n=(r.normal||[]).length, miss=(r.no_reply||[]).length;
+    if(n) logOk(`QSFP 复位完成 (hold_ms=${h}，实际拉低 ${real} ms)；等 2~3 秒再点「查询」确认模块恢复`);
+    else logErr(`QSFP 复位无回复 (no_reply=${miss})`);
+  }catch(e){ logErr('QSFP 复位失败: '+e.message); }
+});
 
 // ---- QSFP 状态展示 / 设置（合并输入框） ----
 function oneBox(k,val,ph,w){ return `<input class="editable" data-qsfp="${k}" value="${val??''}" placeholder="${ph}" style="width:${w}">`; }
@@ -519,7 +537,7 @@ function renderQsfp(v){
               ['CDR ctrl (hex)', oneBox('cdr', v.cdr_hex||'', '0x0F','6rem')],
               ['eq_ctrl', fourBoxes('eq', v.eq_ctrl, '0')],
               ['adapt_eq', fourBoxes('adapt', v.adapt_eq, '1')],
-              ['restl/modsell/lpmode', `${v.restl}/${v.modsell}/${v.lpmode}`]];
+              ['modsell/lpmode', `${v.modsell}/${v.lpmode}`]];
   let html=''; for(const [k,val] of rows){ html += `<tr><td>${k}</td><td class="mono">${val}</td></tr>`; }
   const tb=v.tx_bias||[], tp=v.tx_power||[], rp=v.rx_power||[];
   for(let ch=0;ch<4;ch++){
@@ -695,7 +713,7 @@ function clearDirty(root){
 // 放置共享状态持久化函数（保留 loadConfig 供初始化/混频后刷新）
 function restoreQsfp(q){
   const cdr_hex='0x'+(q.cdr_ctrl||0).toString(16).padStart(2,'0');
-  renderQsfp({ modpresent:null, lpmode:0, restl:0, modsell:0, temperature:'-', vcc:'-',
+  renderQsfp({ modpresent:null, lpmode:0, modsell:0, temperature:'-', vcc:'-',
     tx_bias:[], tx_power:[], rx_power:[], los_lol:[], alarm:[],
     cdr_hex, eq_ctrl:q.eq_ctrl||[5,5,5,5], adapt_eq:q.adapt_eq||[1,1,1,1] });
   logOk('已恢复 QSFP 设置 cdr='+cdr_hex);
