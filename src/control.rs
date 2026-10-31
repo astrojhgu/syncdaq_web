@@ -37,10 +37,15 @@ pub struct DiscoverPlan {
 /// 1) 本机每个非 loopback 网卡的广播地址 —— 覆盖同子网设备（与原行为一致；广播不跨网段，
 ///    所以这里**不**逐 IP 展开本机 /24：广播已覆盖，逐 IP 只会白刷一轮 ARP）；
 /// 2) `extra_subnets` 里显式配置的网段/单机地址 —— 逐 IP 单播，跨网段发现靠这条，
-///    例如设备被单位 DHCP 分到 `10.11.1.138` 时填 `10.11.1.0/24`。
+///    例如设备被单位 DHCP 分到 `10.11.1.138` 时填 `10.11.1.0/24`；
+/// 3) `manual_targets`：页面上「添加并验证」过、持久化在 config 里的地址。这里一并探测，
+///    否则它们若不在 `extra_subnets` 展开范围内就永远得不到验证，「在线/离线」无从判断。
 ///
 /// 广播之外一律走单播，所以只要 IP 路由可达，设备就能被发现。
-pub fn discover_plan(extra_subnets: &[String]) -> Result<DiscoverPlan, String> {
+pub fn discover_plan(
+    extra_subnets: &[String],
+    manual_targets: &[SocketAddr],
+) -> Result<DiscoverPlan, String> {
     let mut plan = DiscoverPlan::default();
     let mut targets: BTreeSet<SocketAddr> = BTreeSet::new();
     let mut local_ips: HashSet<Ipv4Addr> = HashSet::new();
@@ -101,6 +106,23 @@ pub fn discover_plan(extra_subnets: &[String]) -> Result<DiscoverPlan, String> {
                 }
             }
         }
+    }
+
+    // 手工地址：即便不在 discover_subnets 里也要探测，否则 config 里钉住的设备
+    // 永远得不到「在线」验证（列表里只能一直标离线）。
+    for a in manual_targets {
+        targets.insert(*a);
+    }
+    if !manual_targets.is_empty() {
+        plan.notes.push(format!(
+            "手工地址 {} 个一并探测：{}",
+            manual_targets.len(),
+            manual_targets
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     if targets.len() > MAX_DISCOVER_TARGETS {
@@ -215,11 +237,17 @@ fn query_many(targets: &[SocketAddr], timeout: Duration) -> (Vec<SocketAddr>, Ve
     (replies, notes)
 }
 
-/// 执行一次发现：把广播目标与扫描目标一起单播 Query，返回回复的设备地址与过程说明。
+/// 执行一次发现：把广播目标、配置网段与手工地址一起单播 Query，
+/// 返回**本次实测应答**的设备地址与过程说明。
 ///
-/// 回复按地址去重排序；`notes` 供调用方打日志/提示（哪些网段跳过了、扫了多少目标）。
-pub fn discover(extra_subnets: &[String]) -> Result<(Vec<SocketAddr>, Vec<String>), String> {
-    let plan = discover_plan(extra_subnets)?;
+/// 注意返回的是「这一轮谁答了」，调用方据此重建在线列表，
+/// 不能把历史结果并进来——那样已下线的设备会永远留在「已发现」里。
+/// `notes` 供调用方打日志/提示（哪些网段跳过了、扫了多少目标）。
+pub fn discover(
+    extra_subnets: &[String],
+    manual_targets: &[SocketAddr],
+) -> Result<(Vec<SocketAddr>, Vec<String>), String> {
+    let plan = discover_plan(extra_subnets, manual_targets)?;
     let mut notes = plan.notes;
     if plan.targets.is_empty() {
         notes.push("没有可扫描的目标（本机无可用网卡且 discover_subnets 为空）".to_string());

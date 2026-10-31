@@ -45,6 +45,9 @@ struct DeviceEntry {
     ctrl_addr: String,
     ip: String,
     port: u16,
+    /// 本轮发现是否实测应答。`manual_devices` 里持久化的地址在没扫到时会以
+    /// `online=false` 留在列表里（配置不删），但前端不把它放进可选设备。
+    online: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -247,36 +250,98 @@ async fn put_config(st: State<SharedState>, Json(cfg): Json<Config>) -> Json<Con
 }
 
 /// 把地址并入服务器端设备列表（按 ctrl_addr 去重），返回合并后的列表。
+/// 把「刚验证过在线」的地址并入列表（`add_device` 用）。
 fn upsert_devices(st: &SharedState, addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<DeviceEntry> {
     let mut devs = st.devices.write().unwrap_or_else(|e| e.into_inner());
     let mut seen: std::collections::HashSet<String> =
         devs.iter().map(|d| d.ctrl_addr.clone()).collect();
     for a in addrs {
         if seen.insert(a.to_string()) {
-            devs.push(DeviceEntry { ctrl_addr: a.to_string(), ip: a.ip().to_string(), port: a.port() });
+            devs.push(DeviceEntry {
+                ctrl_addr: a.to_string(),
+                ip: a.ip().to_string(),
+                port: a.port(),
+                online: true,
+            });
         }
     }
     devs.clone()
 }
 
-/// 发现设备：本机各网卡广播（覆盖同子网）+ `discover_subnets` 里配置的网段逐 IP 单播。
-/// 跨网段时广播出不去，靠的就是那些单播。
-/// 返回 `{devices, notes}`：notes 说明扫了哪些网段、哪些被跳过（配错时一眼可见）。
+/// 用**本次扫描实测**的结果重建设备列表，替换而不是累加：
+/// 应答的 `online=true`；`manual_devices` 里配置过、但这轮没应答的保留条目并标
+/// `online=false`（配置不删，前端不列入可选设备）。历史累积会让已下线的设备
+/// 永远留在「已发现」里，所以这里必须是重建。
+fn rebuild_devices(st: &SharedState, scanned: &[SocketAddr]) -> Vec<DeviceEntry> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<DeviceEntry> = Vec::new();
+    for a in scanned {
+        if seen.insert(a.to_string()) {
+            out.push(DeviceEntry {
+                ctrl_addr: a.to_string(),
+                ip: a.ip().to_string(),
+                port: a.port(),
+                online: true,
+            });
+        }
+    }
+    let manual: Vec<String> = st
+        .config
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .manual_devices
+        .clone();
+    for raw in manual {
+        let Ok(a) = raw.parse::<SocketAddr>() else { continue };
+        if seen.insert(a.to_string()) {
+            out.push(DeviceEntry {
+                ctrl_addr: a.to_string(),
+                ip: a.ip().to_string(),
+                port: a.port(),
+                online: false,
+            });
+        }
+    }
+    *st.devices.write().unwrap_or_else(|e| e.into_inner()) = out.clone();
+    out
+}
+
+/// 发现设备：本机各网卡广播（覆盖同子网）+ `discover_subnets` 里配置的网段逐 IP 单播
+/// + 手工添加过的地址。跨网段时广播出不去，靠的就是后面两条。
+/// 返回 `{devices, notes}`：`devices` 只含本轮实测应答的设备（外加以 `online=false`
+/// 保留的手工地址），notes 说明扫了哪些网段、哪些没应答（配错时一眼可见）。
 async fn discover(st: State<SharedState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let subnets = st.config.read().unwrap().discover_subnets.clone();
+    let (subnets, manual) = {
+        let cfg = st.config.read().unwrap_or_else(|e| e.into_inner());
+        (
+            cfg.discover_subnets.clone(),
+            cfg.manual_devices
+                .iter()
+                .filter_map(|s| s.parse::<SocketAddr>().ok())
+                .collect::<Vec<_>>(),
+        )
+    };
     let lock = st.ctrl_lock.clone();
-    let (addrs, notes) = tokio::task::spawn_blocking(move || {
+    let (addrs, mut notes) = tokio::task::spawn_blocking(move || {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-        control::discover(&subnets)
+        control::discover(&subnets, &manual)
     })
     .await
     .map_err(|e| ApiError::internal(format!("discover task: {e}")))?
     .map_err(ApiError::internal)?;
 
+    let devs = rebuild_devices(&st, &addrs);
+    let offline: Vec<String> = devs.iter().filter(|d| !d.online).map(|d| d.ctrl_addr.clone()).collect();
+    if !offline.is_empty() {
+        notes.push(format!(
+            "{} 个手工地址本轮未应答（config 中保留，不列入可选设备）：{}",
+            offline.len(),
+            offline.join(", ")
+        ));
+    }
     for n in &notes {
         tracing::info!("discover: {n}");
     }
-    let devs = upsert_devices(&st, addrs);
     let _ = st.ws_tx.send(WsMsg::Devices { devices: devs.clone() });
     Ok(Json(serde_json::json!({ "devices": devs, "notes": notes })))
 }
@@ -991,12 +1056,18 @@ async fn main() {
 
     let st: SharedState = Arc::new(AppState {
         config: RwLock::new(cfg.clone()),
-        // 启动时把持久化的手工设备回填进列表（不校验在线：页面一打开就能选）
+        // 启动时把持久化的手工设备回填进列表，但标 `online=false`：重启后还没扫过，
+        // 谁在线是未知的。页面不会把它们放进可选设备，等一次「发现」实测后才算在线。
         devices: RwLock::new(
             cfg.manual_devices
                 .iter()
                 .filter_map(|s| s.parse::<SocketAddr>().ok())
-                .map(|a| DeviceEntry { ctrl_addr: a.to_string(), ip: a.ip().to_string(), port: a.port() })
+                .map(|a| DeviceEntry {
+                    ctrl_addr: a.to_string(),
+                    ip: a.ip().to_string(),
+                    port: a.port(),
+                    online: false,
+                })
                 .collect(),
         ),
         status: RwLock::new(None),

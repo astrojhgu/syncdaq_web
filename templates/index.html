@@ -68,6 +68,7 @@
       <button id="statusBtn">刷新状态</button>
     </div>
     <div id="devHint" style="font-size:.72rem;color:#9db6e0;margin-top:.4rem"></div>
+    <div id="devOffline" style="font-size:.72rem;color:#c98080;margin-top:.2rem"></div>
   </section>
 
   <!-- 状态 -->
@@ -423,19 +424,26 @@ function drawSpectra(data){
 let currentSelected = null;
 function fillDeviceSel(devs, autoselectLast){
   const sel=$('deviceSel'); if(!sel) return;
+  // 只有本轮实测应答（online）的设备才进可选列表；config 里保留但没应答的
+  // 单独一行提示，避免已下线的设备被当成"已发现"选中。
+  const all=devs||[];
+  const online=all.filter(d=>d.online!==false);
+  const offline=all.filter(d=>d.online===false);
   sel.innerHTML='';
-  (devs||[]).forEach(d=>{ const o=document.createElement('option'); o.value=d.ctrl_addr; o.textContent=d.ctrl_addr+'  (ip '+d.ip+')'; sel.appendChild(o); });
-  $('devHint').textContent='已发现 '+((devs||[]).length)+' 个设备';
+  online.forEach(d=>{ const o=document.createElement('option'); o.value=d.ctrl_addr; o.textContent=d.ctrl_addr+'  (ip '+d.ip+')'; sel.appendChild(o); });
+  $('devHint').textContent='在线 '+online.length+' 台'+(offline.length?`；config 中 ${offline.length} 台未应答，不列入可选`: '');
+  $('devOffline').textContent = offline.length? '离线：'+offline.map(d=>d.ctrl_addr).join(', ') : '';
   if(currentSelected && [...sel.options].some(o=>o.value===currentSelected)){ sel.value=currentSelected; }
-  else if(autoselectLast && devs && devs.length){ sel.value=devs[devs.length-1].ctrl_addr; }
+  else if(autoselectLast && online.length){ sel.value=online[online.length-1].ctrl_addr; }
 }
 async function discover(){
   try{
     const r=await api('/api/discover');
     const devs=r.devices||[];
+    const online=devs.filter(d=>d.online!==false);
     fillDeviceSel(devs, true);
     (r.notes||[]).forEach(n=>log('· '+n));
-    logOk('发现 '+devs.length+' 设备');
+    logOk('发现 '+online.length+' 台在线设备');
   }
   catch(e){ logErr('发现失败: '+e.message); }
 }
@@ -723,6 +731,8 @@ function restoreQsfp(q){
 document.addEventListener('input', e=>{ if(e.target && e.target.classList && e.target.classList.contains('editable')) e.target.classList.add('dirty'); });
 document.addEventListener('change', e=>{ if(e.target && e.target.classList && e.target.classList.contains('editable')) e.target.classList.add('dirty'); });
 
+// 启动时列表是空的：在线状态只能靠实测，点「发现设备」后才填。
+$('devHint').textContent='尚未发现：点「发现设备」（会一并探测 config 里的手工地址）';
 loadConfig();
 </script>
 </body>

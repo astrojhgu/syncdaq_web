@@ -6,7 +6,7 @@
 
 ## 功能
 
-- **设备发现与选择**：**广播 + 主动单播扫描**两条腿——广播覆盖同子网设备，`discover_subnets` 里配的网段（如 `10.11.1.0/24`）走单播逐地址 `Query`，因此**设备被 DHCP 分到别的网段也能发现**；另有「添加并验证」输入框可手工钉一个 `ip:port`（先单播 `Query` 确认在线再入列表，持久化到 config）。
+- **设备发现与选择**：**广播 + 主动单播扫描**两条腿——广播覆盖同子网设备，`discover_subnets` 里配的网段（如 `10.11.1.0/24`）走单播逐地址 `Query`，因此**设备被 DHCP 分到别的网段也能发现**；另有「添加并验证」输入框可手工钉一个 `ip:port`（先单播 `Query` 确认在线再入列表，持久化到 config）。**每轮发现都会重建在线列表**：扫描结果（含 config 里的手工地址）实测应答的才进可选设备；配置过但本轮没应答的保留在 config 里、在页面下方以「离线」列出，不会被当成已发现设备。
 - **一键初始化**：按“设备当前 XGbe 配置”重放 `SetClk + Sync + XGbeCfgSingle×8 + SetMixer`（时钟源、本振可配置）。命令**逐个执行、逐条经 WebSocket 推送到日志**。
 - **状态监控**：`Query` 解析（固件版本、tick、locked、温度、采样率、nports、trans_state 等），WebSocket 自动刷新。
 - **控制面板**：
@@ -61,7 +61,7 @@ lo_mhz: 360.0              # 本振（LO）频率（MHz）：频谱 x 轴偏移 
 selected_device: "192.168.5.145:3000"   # 最近选择的设备
 discover_subnets:           # 逐 IP 单播扫描的额外网段（跨网段发现靠它；同子网设备由广播覆盖，无需写本机网段）
   - 10.11.1.0/24            # 设备被单位 DHCP 分到别的网段时填这里；只支持 /24../30，或直接写单个 IP
-manual_devices:             # 页面「添加并验证」过的设备地址，持久化，重启自动回填
+manual_devices:             # 页面「添加并验证」过的设备地址：持久化，每轮发现时一并探测在线
   - 10.11.1.138:3000
 capture:
   frames_per_port: 1000    # 抓取每端口帧数
@@ -98,7 +98,7 @@ qsfp:
 | GET | `/ws` | WebSocket（状态刷新、采集进度/结果、初始化步骤推送） |
 | GET | `/api/config` / PUT | 读取/保存 config |
 | GET | `/api/settings` | 读取设备状态（XGbe/DSA/QSFP） |
-| POST | `/api/discover` | 发现设备：本机网卡广播 + `discover_subnets` 逐 IP 单播；返回 `{devices, notes}` |
+| POST | `/api/discover` | 发现设备：本机网卡广播 + `discover_subnets` 逐 IP 单播 + config 里的手工地址；返回 `{devices, notes}`。`devices` 只含本轮应答（`online: true`），配置过但未应答的以 `online: false` 保留 |
 | GET | `/api/devices` | 设备列表（含手工添加的） |
 | POST | `/api/device/add` | 手工添加设备 `{addr}`：先单播 `Query` 验证在线，通过后入列表并持久化 |
 | POST | `/api/select` | 设置当前设备 |

@@ -45,7 +45,8 @@ pub struct Config {
     /// 只支持 /24../30（一段最多 254 个目标）。
     #[serde(default)]
     pub discover_subnets: Vec<String>,
-    /// 手工添加并验证过的设备控制地址（"ip:port"），持久化，重启后仍回填到设备列表。
+    /// 手工添加并验证过的设备控制地址（"ip:port"）。持久化；重启后回填到列表但标为
+    /// 未验证（`online=false`），每轮「发现」会连同扫描目标一起探测，实测应答的才算在线。
     #[serde(default)]
     pub manual_devices: Vec<String>,
     /// 是否已完成初始化（成功下发过 Init）——用于页面 banner 提示。
